@@ -10,11 +10,13 @@
 
 #include "duckdb/execution/operator/persistent/physical_copy_to_file.hpp"
 
+#include "duckdb/common/enums/order_type.hpp"
 #include "duckdb/execution/physical_operator.hpp"
 #include "duckdb/common/index_vector.hpp"
 #include "storage/ducklake_stats.hpp"
 #include "common/ducklake_data_file.hpp"
 #include "storage/ducklake_field_data.hpp"
+#include "storage/ducklake_sort_data.hpp"
 
 namespace duckdb {
 class DuckLakeCatalog;
@@ -134,6 +136,13 @@ struct DuckLakeCopyOptions {
 
 	//! Set of projection columns to execute prior to inserting (if any)
 	vector<unique_ptr<Expression>> projection_list;
+
+	//! Sort expressions for ordering data during insert
+	vector<unique_ptr<Expression>> sort_expressions;
+	//! Sort order types (ASC/DESC) corresponding to sort_expressions
+	vector<OrderType> sort_order_types;
+	//! Null ordering types (NULLS_FIRST/NULLS_LAST) corresponding to sort_expressions
+	vector<OrderByNullType> sort_null_orders;
 };
 
 struct DuckLakeCopyInput {
@@ -143,6 +152,7 @@ struct DuckLakeCopyInput {
 
 	DuckLakeCatalog &catalog;
 	optional_ptr<DuckLakePartition> partition_data;
+	optional_ptr<DuckLakeSort> sort_data;
 	optional_ptr<DuckLakeFieldData> field_data;
 	const ColumnList &columns;
 	const string data_path;

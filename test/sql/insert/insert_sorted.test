@@ -1,0 +1,44 @@
+# name: test/sql/insert/insert_sorted.test
+# description: test ducklake insert with SET SORTED BY metadata
+# group: [insert]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION __TEST_DIR__/{UUID}.db
+
+statement ok
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '__TEST_DIR__/insert_sorted/')
+
+statement ok
+USE ducklake;
+
+# Create an empty table
+statement ok
+CREATE TABLE ordered_inserts_table (id BIGINT, value VARCHAR);
+
+# Set the sort order to DESC
+statement ok
+ALTER TABLE ordered_inserts_table SET SORTED BY (id DESC);
+
+# Insert data with ORDER BY ASC (opposite of SET SORTED BY)
+statement ok
+INSERT INTO ordered_inserts_table (id, value)
+FROM range(5) t(i)
+SELECT
+    i AS id,
+    'value' || i AS value
+ORDER BY
+    i ASC
+;
+
+# Verify data comes back in DESC order (matching SET SORTED BY, not the insert order)
+query II
+SELECT * FROM ordered_inserts_table
+----
+4	value4
+3	value3
+2	value2
+1	value1
+0	value0

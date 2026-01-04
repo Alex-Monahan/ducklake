@@ -21,6 +21,9 @@
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/function/function_binder.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
+#include "duckdb/parser/parser.hpp"
+#include "duckdb/execution/operator/order/physical_order.hpp"
+#include "storage/ducklake_sort_data.hpp"
 
 namespace duckdb {
 
@@ -316,6 +319,7 @@ DuckLakeCopyInput::DuckLakeCopyInput(ClientContext &context, DuckLakeTableEntry 
     : catalog(table.ParentCatalog().Cast<DuckLakeCatalog>()), columns(table.GetColumns()),
       data_path(table.DataPath() + hive_partition) {
 	partition_data = table.GetPartitionData();
+	sort_data = table.GetSortData();
 	field_data = table.GetFieldData();
 	schema_id = table.ParentSchema().Cast<DuckLakeSchemaEntry>().GetSchemaId();
 	table_id = table.GetTableId();
@@ -492,6 +496,78 @@ static void GeneratePartitionExpressions(ClientContext &context, DuckLakeCopyInp
 	}
 }
 
+static void GenerateSortExpressions(ClientContext &context, DuckLakeCopyInput &copy_input,
+                                    DuckLakeCopyOptions &copy_options) {
+	if (!copy_input.sort_data) {
+		return;
+	}
+
+	// Build a map of column names to indices for binding
+	case_insensitive_map_t<idx_t> column_map;
+	idx_t col_idx = 0;
+	for (auto &col : copy_input.columns.Physical()) {
+		column_map[col.Name()] = col_idx++;
+	}
+
+	vector<string> unmatched_columns;
+
+	for (auto &sort_field : copy_input.sort_data->fields) {
+		// Skip non-DuckDB dialect sort expressions
+		if (sort_field.dialect != "duckdb") {
+			continue;
+		}
+
+		// Parse the expression string to get the column name
+		auto parsed_expressions = Parser::ParseExpressionList(sort_field.expression);
+		if (parsed_expressions.empty()) {
+			// Column not found - record for error message
+			unmatched_columns.push_back(sort_field.expression);
+			continue;
+		}
+
+		// Get the column name from the parsed expression
+		string column_name = parsed_expressions[0]->GetName();
+
+		// Look up the column in the table
+		auto column_it = column_map.find(column_name);
+		if (column_it == column_map.end()) {
+			// Column not found - record for error message
+			unmatched_columns.push_back(column_name);
+			continue;
+		}
+
+		idx_t column_index = column_it->second;
+
+		// Get the column type
+		auto &column = copy_input.columns.GetColumn(PhysicalIndex(column_index));
+		LogicalType col_type = column.Type();
+
+		// Handle type casting if needed (use casted type for sort expression)
+		if (DuckLakeTypes::RequiresCast(col_type)) {
+			col_type = DuckLakeTypes::GetCastedType(col_type);
+		}
+
+		// Create a BoundReferenceExpression for the sort column
+		auto sort_expr = make_uniq<BoundReferenceExpression>(col_type, column_index);
+
+		copy_options.sort_expressions.push_back(std::move(sort_expr));
+		copy_options.sort_order_types.push_back(sort_field.sort_direction);
+		copy_options.sort_null_orders.push_back(sort_field.null_order);
+	}
+
+	// If any columns were not found, throw an informative error
+	if (!unmatched_columns.empty()) {
+		string error_msg = "Sort columns not found in table: ";
+		for (idx_t i = 0; i < unmatched_columns.size(); i++) {
+			if (i > 0) {
+				error_msg += ", ";
+			}
+			error_msg += unmatched_columns[i];
+		}
+		throw BinderException(error_msg);
+	}
+}
+
 DuckLakeCopyOptions DuckLakeInsert::GetCopyOptions(ClientContext &context, DuckLakeCopyInput &copy_input) {
 	auto info = make_uniq<CopyInfo>();
 	auto &catalog = copy_input.catalog;
@@ -616,6 +692,12 @@ DuckLakeCopyOptions DuckLakeInsert::GetCopyOptions(ClientContext &context, DuckL
 		// we are partitioning - generate partition expressions (if any)
 		GeneratePartitionExpressions(context, copy_input, result);
 	}
+
+	if (copy_input.sort_data) {
+		// we are sorting - generate sort expressions
+		GenerateSortExpressions(context, copy_input, result);
+	}
+
 	return result;
 }
 
@@ -698,6 +780,30 @@ PhysicalOperator &DuckLakeInsert::PlanCopyForInsert(ClientContext &context, Phys
 				}
 			}
 		}
+	}
+
+	// Add sort operator if sort expressions are configured
+	if (!copy_options.sort_expressions.empty() && plan) {
+		// Build BoundOrderByNode objects from the sort data
+		vector<BoundOrderByNode> orders;
+		for (idx_t i = 0; i < copy_options.sort_expressions.size(); i++) {
+			// Copy the expression since BoundOrderByNode takes ownership
+			auto sort_expr = copy_options.sort_expressions[i]->Copy();
+			orders.emplace_back(copy_options.sort_order_types[i], copy_options.sort_null_orders[i],
+			                    std::move(sort_expr));
+		}
+
+		// Create projections that map all columns (identity projection)
+		vector<idx_t> projections;
+		for (idx_t i = 0; i < plan->types.size(); i++) {
+			projections.push_back(i);
+		}
+
+		// Create the PhysicalOrder operator
+		auto &order = planner.Make<PhysicalOrder>(plan->types, std::move(orders), std::move(projections),
+		                                          plan->estimated_cardinality);
+		order.children.push_back(*plan);
+		plan = order;
 	}
 
 	auto copy_return_types = GetCopyFunctionReturnLogicalTypes(CopyFunctionReturnType::WRITTEN_FILE_STATISTICS);
