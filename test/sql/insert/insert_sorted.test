@@ -2,6 +2,19 @@
 # description: test ducklake insert with SET SORTED BY metadata
 # group: [insert]
 
+# TODO: 
+# Test when column names do not match
+
+# Go back to the old PR and get it to fail if we try to add a sorted constraint that is invalid
+
+# Add an option for sort_on_insert
+
+# Test when partitioning is in use
+
+# Test when inlining is in use
+
+
+
 require ducklake
 
 require parquet
