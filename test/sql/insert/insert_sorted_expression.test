@@ -1,0 +1,56 @@
+# name: test/sql/insert/insert_sorted_expression.test
+# description: test ducklake insert with SET SORTED BY using expressions (not supported)
+# group: [insert]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION __TEST_DIR__/{UUID}.db
+
+statement ok
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '__TEST_DIR__/insert_sorted_expression/')
+
+statement ok
+USE ducklake;
+
+# Create a table
+statement ok
+CREATE TABLE test_table (id BIGINT, value VARCHAR);
+
+# Set sorted by an expression (concat) - expressions are not supported, only column references
+statement ok
+ALTER TABLE test_table SET SORTED BY (concat(id, '_', value) ASC);
+
+# Insert should fail because expressions are not supported as sort keys
+statement error
+INSERT INTO test_table (id, value)
+FROM range(5) t(i)
+SELECT
+    i AS id,
+    'value' || i AS value
+ORDER BY
+    i ASC
+;
+----
+Sort columns not found in table: concat(id, '_', "value")
+
+# Test with arithmetic expression
+statement ok
+CREATE TABLE test_table2 (id BIGINT, value VARCHAR);
+
+statement ok
+ALTER TABLE test_table2 SET SORTED BY ((id + 1) DESC);
+
+# Insert should fail because arithmetic expressions are not supported
+statement error
+INSERT INTO test_table2 (id, value)
+FROM range(5) t(i)
+SELECT
+    i AS id,
+    'value' || i AS value
+ORDER BY
+    i ASC
+;
+----
+Sort columns not found in table: (id + 1)

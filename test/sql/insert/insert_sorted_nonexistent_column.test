@@ -1,0 +1,56 @@
+# name: test/sql/insert/insert_sorted_nonexistent_column.test
+# description: test ducklake insert with SET SORTED BY referencing non-existent columns
+# group: [insert]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION __TEST_DIR__/{UUID}.db
+
+statement ok
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '__TEST_DIR__/insert_sorted_nonexistent/')
+
+statement ok
+USE ducklake;
+
+# Create a table
+statement ok
+CREATE TABLE test_table (id BIGINT, value VARCHAR);
+
+# Set sorted by a column that does not exist
+statement ok
+ALTER TABLE test_table SET SORTED BY (nonexistent_column DESC);
+
+# Insert should fail because the sort column does not exist
+statement error
+INSERT INTO test_table (id, value)
+FROM range(5) t(i)
+SELECT
+    i AS id,
+    'value' || i AS value
+ORDER BY
+    i ASC
+;
+----
+Sort columns not found in table: nonexistent_column
+
+# Test with multiple non-existent columns
+statement ok
+CREATE TABLE test_table2 (id BIGINT, value VARCHAR);
+
+statement ok
+ALTER TABLE test_table2 SET SORTED BY (missing_col1 ASC, missing_col2 DESC);
+
+# Insert should fail and list all missing columns
+statement error
+INSERT INTO test_table2 (id, value)
+FROM range(5) t(i)
+SELECT
+    i AS id,
+    'value' || i AS value
+ORDER BY
+    i ASC
+;
+----
+Sort columns not found in table: missing_col1, missing_col2
