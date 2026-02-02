@@ -23,29 +23,39 @@ loop i 0 2
 statement ok
 CREATE TABLE test_${i} (key INTEGER, values VARCHAR);
 
-# 2	{tables_inserted_into=[1]}
 statement ok
 INSERT INTO test_${i}  SELECT i, concat('thisisastring_', i) FROM range(100) t(i)
 
+statement ok
+CALL ducklake_flush_inlined_data('ducklake')
+
 # Let's do a few insertions interleaved with deletions
-# 3	{tables_deleted_from=[1]}
 statement ok
 DELETE FROM test_${i}
 WHERE key < 50;
 
-# 4	{tables_inserted_into=[1]}
+statement ok
+CALL ducklake_flush_inlined_data('ducklake')
+
 statement ok
 INSERT INTO test_${i}  SELECT i, concat('thisisastring_', i) FROM range(100,200) t(i)
 
-# 5	{tables_deleted_from=[1]}
+statement ok
+CALL ducklake_flush_inlined_data('ducklake')
+
 statement ok
 DELETE FROM test_${i}
 WHERE key < 80;
 
-# 6	{tables_deleted_from=[1]}
+statement ok
+CALL ducklake_flush_inlined_data('ducklake')
+
 statement ok
 DELETE FROM test_${i}
 WHERE key  = 120;
+
+statement ok
+CALL ducklake_flush_inlined_data('ducklake')
 
 endloop
 
@@ -53,86 +63,86 @@ endloop
 query IIII
 SELECT data_file_id, delete_file_id, begin_snapshot, end_snapshot FROM ducklake_metadata.ducklake_delete_file
 ----
-0	3	3	NULL
-2	4	6	NULL
-5	8	9	NULL
-7	9	12	NULL
+1	5	4	NULL
+4	6	10	NULL
+8	12	15	NULL
+11	13	21	NULL
 
 query III
 SELECT data_file_id, begin_snapshot, end_snapshot FROM ducklake_metadata.ducklake_data_file
 ----
-0	2	NULL
-2	4	NULL
-5	8	NULL
-7	10	NULL
+1	2	NULL
+4	6	NULL
+8	13	NULL
+11	17	NULL
 
 # Now lets call the rewrite function in the whole DB
 statement ok
 CALL ducklake_rewrite_data_files('ducklake', delete_threshold => 0);
 
-# Check ze files after rewrite, we should have removed the last file of each table (i.e., id 4 and 9)
+# Check ze files after rewrite, we should have removed the last file of each table
 query IIII
 SELECT data_file_id, delete_file_id, begin_snapshot, end_snapshot FROM ducklake_metadata.ducklake_delete_file ORDER BY ALL
 ----
-0	3	3	13
-2	4	6	13
-5	8	9	13
-7	9	12	13
+1	5	4	23
+4	6	10	23
+8	12	15	23
+11	13	21	23
 
 query III
 SELECT data_file_id, begin_snapshot, end_snapshot FROM ducklake_metadata.ducklake_data_file  ORDER BY ALL
 ----
-0	2	13
-2	4	13
-5	8	13
-7	10	13
-10	13	NULL
-11	13	NULL
+1	2	23
+4	6	23
+8	13	23
+11	17	23
+14	23	NULL
+15	23	NULL
 
 # Validate some results
 query I
-select count(*) from test_0 AT (VERSION => 3);
+select count(*) from test_0 AT (VERSION => 4);
 ----
 50
 
 query I
-select count(*) from test_0 AT (VERSION => 4);
+select count(*) from test_0 AT (VERSION => 6);
 ----
 150
 
 query I
-select count(*) from test_0 AT (VERSION => 5);
+select count(*) from test_0 AT (VERSION => 10);
 ----
-120
+119
 
 query I
-select count(*) from test_0 AT (VERSION => 6);
+select count(*) from test_0 AT (VERSION => 12);
 ----
 119
 
 # Check other table
 query I
-select count(*) from test_1 AT (VERSION => 8);
+select count(*) from test_1 AT (VERSION => 13);
 ----
 100
 
 query I
-select count(*) from test_1 AT (VERSION => 9);
+select count(*) from test_1 AT (VERSION => 15);
 ----
 50
 
 query I
-select count(*) from test_1 AT (VERSION => 10);
+select count(*) from test_1 AT (VERSION => 17);
 ----
 150
 
 query I
-select count(*) from test_1 AT (VERSION => 11);
+select count(*) from test_1 AT (VERSION => 21);
 ----
-120
+119
 
 query I
-select count(*) from test_1 AT (VERSION => 12);
+select count(*) from test_1 AT (VERSION => 22);
 ----
 119
 

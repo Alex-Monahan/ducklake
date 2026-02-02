@@ -32,6 +32,9 @@ CREATE TABLE test(key INTEGER, values VARCHAR);
 statement ok
 INSERT INTO test SELECT i, concat('thisisastring_', i) FROM range(100) t(i)
 
+statement ok
+CALL ducklake_flush_inlined_data('ducklake')
+
 # Let's do three rounds of deletions
 statement ok
 DELETE FROM test
@@ -44,6 +47,9 @@ WHERE key > 90;
 statement ok
 DELETE FROM test
 WHERE key > 41;
+
+statement ok
+CALL ducklake_flush_inlined_data('ducklake')
 
 concurrentloop i 0 2
 
@@ -64,43 +70,48 @@ FROM test
 query III
 SELECT data_file_id, begin_snapshot, end_snapshot FROM ducklake_metadata.ducklake_data_file
 ----
-0	2	6
-4	6	NULL
+1	2	8
+3	8	NULL
 
 # Lets time travel
 query I
-SELECT count(*) FROM test AT (VERSION => 2)
+SELECT count(*) FROM test AT (VERSION => 3)
 ----
 100
 
 query I
-SELECT count(*) FROM test AT (VERSION => 3)
+SELECT count(*) FROM test AT (VERSION => 4)
 ----
 61
 
 query I
-SELECT count(*) FROM test AT (VERSION => 4)
-----
-52
-
-query I
 SELECT count(*) FROM test AT (VERSION => 5)
 ----
-3
+52
 
 query I
 SELECT count(*) FROM test AT (VERSION => 6)
 ----
 3
 
-# We have 2 deletion files to delete due to the merging of deletion files
+query I
+SELECT count(*) FROM test AT (VERSION => 7)
+----
+3
+
+query I
+SELECT count(*) FROM test AT (VERSION => 8)
+----
+3
+
+# With inlining, deletion files are handled differently
 query I
 SELECT COUNT(*) FROM ducklake_metadata.ducklake_files_scheduled_for_deletion
 ----
-2
+0
 
-# We have one file from snapshots 3 - 6, as we written a new data file in 6
+# We have one file from snapshots 4 - 8, as we written a new data file in 8
 query II
 SELECT begin_snapshot, end_snapshot FROM ducklake_metadata.ducklake_delete_file ORDER BY ALL
 ----
-3	6
+4	8

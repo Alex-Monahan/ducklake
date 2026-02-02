@@ -22,38 +22,52 @@ loop i 0 2
 statement ok
 CREATE TABLE test(key INTEGER, values VARCHAR);
 
-# 2	{tables_inserted_into=[1]}
 statement ok
 INSERT INTO test SELECT i, concat('thisisastring_', i) FROM range(100) t(i)
 
+statement ok
+CALL ducklake_flush_inlined_data('ducklake')
+
 # Let's do a few insertions interleaved with deletions
-# 3	{tables_deleted_from=[1]}
 statement ok
 DELETE FROM test
 WHERE key < 50;
 
-# 4	{tables_inserted_into=[1]}
+statement ok
+CALL ducklake_flush_inlined_data('ducklake')
+
 statement ok
 INSERT INTO test SELECT i, concat('thisisastring_', i) FROM range(100,200) t(i)
 
-# 5	{tables_deleted_from=[1]}
+statement ok
+CALL ducklake_flush_inlined_data('ducklake')
+
 statement ok
 DELETE FROM test
 WHERE key < 80;
 
-# 6	{tables_deleted_from=[1]}
+statement ok
+CALL ducklake_flush_inlined_data('ducklake')
+
 statement ok
 DELETE FROM test
 WHERE key  = 120;
 
-# 7	{tables_inserted_into=[1]}
+statement ok
+CALL ducklake_flush_inlined_data('ducklake')
+
 statement ok
 INSERT INTO test SELECT i, concat('thisisastring_', i) FROM range(200,300) t(i)
 
-# 8	{tables_deleted_from=[1]}
+statement ok
+CALL ducklake_flush_inlined_data('ducklake')
+
 statement ok
 DELETE FROM test
 WHERE key  > 200 and key < 250;
+
+statement ok
+CALL ducklake_flush_inlined_data('ducklake')
 
 skipif i=1
 query I
@@ -132,32 +146,32 @@ select count(*) from test;
 170
 
 query I
-select count(*) from test AT (VERSION => 3);
+select count(*) from test AT (VERSION => 5);
 ----
 50
 
 query I
-select count(*) from test AT (VERSION => 4);
+select count(*) from test AT (VERSION => 7);
 ----
 150
 
 query I
-select count(*) from test AT (VERSION => 5);
+select count(*) from test AT (VERSION => 9);
 ----
 120
 
 query I
-select count(*) from test AT (VERSION => 6);
+select count(*) from test AT (VERSION => 11);
 ----
 119
 
 query I
-select count(*) from test AT (VERSION => 7);
+select count(*) from test AT (VERSION => 13);
 ----
 219
 
 query I
-select count(*) from test AT (VERSION => 8);
+select count(*) from test AT (VERSION => 15);
 ----
 170
 
