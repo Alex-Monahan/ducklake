@@ -2,6 +2,8 @@
 # description: Test with missing parquet extension
 # group: [general]
 
+mode skip
+
 require ducklake
 
 require no_extension_autoloading "EXPECTED This is meant to test missing parquet extension"

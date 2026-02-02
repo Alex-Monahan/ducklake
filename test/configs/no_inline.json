@@ -1,0 +1,10 @@
+{
+  "description": "Run DuckLake tests with data inlining disabled.",
+  "on_init": "SET ducklake_default_data_inlining_row_limit = 0;",
+  "statically_loaded_extensions": [
+    "core_functions",
+    "parquet",
+    "ducklake",
+    "icu"
+  ]
+}
