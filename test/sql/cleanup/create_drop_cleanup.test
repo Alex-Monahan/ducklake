@@ -22,7 +22,10 @@ statement ok
 CREATE TABLE ducklake.tbl(i INT);
 
 statement ok
-INSERT INTO ducklake.tbl VALUES (42);
+INSERT INTO ducklake.tbl SELECT * FROM range(20);
+
+statement ok
+CALL ducklake_flush_inlined_data('ducklake')
 
 query I
 SELECT COUNT(*) FROM glob('${DATA_PATH}/ducklake_createq_drop_cleanup/main/tbl/*.parquet')
