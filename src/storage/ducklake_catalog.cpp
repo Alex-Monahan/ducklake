@@ -816,7 +816,7 @@ bool DuckLakeCatalog::TryGetConfigOption(const string &option, string &result, D
 }
 
 idx_t DuckLakeCatalog::DataInliningRowLimit(SchemaIndex schema_index, TableIndex table_index) const {
-	return GetConfigOption<idx_t>("data_inlining_row_limit", schema_index, table_index, 1000);
+	return GetConfigOption<idx_t>("data_inlining_row_limit", schema_index, table_index, 10);
 }
 
 unique_ptr<LogicalOperator> DuckLakeCatalog::BindAlterAddIndex(Binder &binder, TableCatalogEntry &table_entry,
