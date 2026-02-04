@@ -560,6 +560,27 @@ unique_ptr<CatalogEntry> DuckLakeTableEntry::AlterTable(DuckLakeTransaction &tra
 
 	RequireNextColumnId(transaction);
 	auto new_entry = make_uniq<DuckLakeTableEntry>(*this, table_info, LocalChangeType::ADD_COLUMN);
+
+	if (transaction.HasTransactionInlinedData(GetTableId())) {
+		auto &new_table = new_entry->Cast<DuckLakeTableEntry>();
+		LogicalIndex new_col_idx(new_table.columns.LogicalColumnCount() - 1);
+		auto &new_col = new_table.GetColumn(new_col_idx);
+		auto &field_id = new_table.GetFieldData().GetByRootIndex(new_col.Physical());
+		FieldIndex new_field_index = field_id.GetFieldIndex();
+
+		// Get default value if it's a constant literal
+		Value default_value;
+		if (info.new_column.HasDefaultValue()) {
+			auto &default_expr = info.new_column.DefaultValue();
+			if (default_expr.type == ExpressionType::VALUE_CONSTANT) {
+				auto &constant_expr = default_expr.Cast<ConstantExpression>();
+				default_value = constant_expr.value.DefaultCastAs(new_col.Type());
+			}
+		}
+
+		transaction.AddColumnToLocalInlinedData(GetTableId(), new_col.Type(), new_field_index, default_value);
+	}
+
 	return std::move(new_entry);
 }
 
@@ -1133,7 +1154,11 @@ unique_ptr<CatalogEntry> DuckLakeTableEntry::AlterTable(DuckLakeTransaction &tra
 
 unique_ptr<CatalogEntry> DuckLakeTableEntry::Alter(DuckLakeTransaction &transaction, AlterTableInfo &info) {
 	if (transaction.HasTransactionInlinedData(GetTableId())) {
-		throw NotImplementedException("ALTER on a table with transaction-local inlined data is not supported");
+		// Only ADD_COLUMN is supported with transaction-local inlined data
+		if (info.alter_table_type != AlterTableType::ADD_COLUMN) {
+			throw NotImplementedException("ALTER on a table with transaction-local inlined data is not supported %s",
+			                              EnumUtil::ToString(info.alter_table_type));
+		}
 	}
 	switch (info.alter_table_type) {
 	case AlterTableType::RENAME_TABLE:

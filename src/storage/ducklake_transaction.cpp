@@ -2154,6 +2154,72 @@ void DuckLakeTransaction::DeleteFromLocalInlinedData(TableIndex table_id, set<id
 	table_changes.new_inlined_data->data = std::move(new_data);
 }
 
+void DuckLakeTransaction::AddColumnToLocalInlinedData(TableIndex table_id, const LogicalType &new_column_type,
+                                                      FieldIndex new_field_index, const Value &default_value) {
+	auto entry = table_data_changes.find(table_id);
+	if (entry == table_data_changes.end()) {
+		throw InternalException("AddColumnToLocalInlinedData called but no transaction-local data exists");
+	}
+	auto &table_changes = entry->second;
+	if (!table_changes.new_inlined_data) {
+		throw InternalException("AddColumnToLocalInlinedData called but no inlined data exists");
+	}
+
+	auto &existing = *table_changes.new_inlined_data->data;
+
+	// New types: existing + new column
+	auto new_types = existing.Types();
+	new_types.push_back(new_column_type);
+
+	auto context_ref = context.lock();
+	auto new_data = make_uniq<ColumnDataCollection>(*context_ref, new_types);
+
+	ColumnDataAppendState append_state;
+	new_data->InitializeAppend(append_state);
+
+	bool has_default = !default_value.IsNull();
+
+	for (auto &chunk : existing.Chunks()) {
+		DataChunk new_chunk;
+		new_chunk.Initialize(*context_ref, new_types);
+
+		// Copy existing columns
+		for (idx_t col_idx = 0; col_idx < chunk.ColumnCount(); col_idx++) {
+			new_chunk.data[col_idx].Reference(chunk.data[col_idx]);
+		}
+
+		// New column: use default value or NULL
+		auto &new_col_vector = new_chunk.data[chunk.ColumnCount()];
+		if (has_default) {
+			new_col_vector.Reference(default_value);
+		} else {
+			new_col_vector.SetVectorType(VectorType::CONSTANT_VECTOR);
+			ConstantVector::SetNull(new_col_vector, true);
+		}
+
+		new_chunk.SetCardinality(chunk.size());
+		new_data->Append(append_state, new_chunk);
+	}
+
+	// Add stats for new column
+	idx_t total_rows = existing.Count();
+	DuckLakeColumnStats new_col_stats(new_column_type);
+	new_col_stats.num_values = total_rows;
+	new_col_stats.has_num_values = true;
+	if (has_default) {
+		new_col_stats.null_count = 0;
+		new_col_stats.has_null_count = true;
+		new_col_stats.any_valid = true;
+	} else {
+		new_col_stats.null_count = total_rows;
+		new_col_stats.has_null_count = true;
+		new_col_stats.any_valid = false;
+	}
+
+	table_changes.new_inlined_data->column_stats.emplace(new_field_index, std::move(new_col_stats));
+	table_changes.new_inlined_data->data = std::move(new_data);
+}
+
 optional_ptr<DuckLakeInlinedDataDeletes> DuckLakeTransaction::GetInlinedDeletes(TableIndex table_id,
                                                                                 const string &table_name) {
 	lock_guard<mutex> guard(table_data_changes_lock);
