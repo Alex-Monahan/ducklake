@@ -203,6 +203,23 @@ AsyncResult DuckLakeInlinedDataReader::Scan(ClientContext &context, GlobalTableF
 				break;
 			}
 			case InlinedVirtualColumn::COLUMN_ROW_ID: {
+				// Check if there's an expression to evaluate (e.g., row_id_start + file_row_number)
+				if (!expression_map.empty() && c < column_ids.size()) {
+					auto local_id = column_ids[MultiFileLocalIndex(c)];
+					auto expr_it = expression_executors.find(local_id);
+					if (expr_it != expression_executors.end()) {
+						DataChunk expr_input;
+						expr_input.Initialize(Allocator::Get(context), {LogicalType::BIGINT});
+						expr_input.Reset();
+						auto ordinal_data = FlatVector::GetData<int64_t>(expr_input.data[0]);
+						for (idx_t r = 0; r < scan_chunk.size(); r++) {
+							ordinal_data[r] = NumericCast<int64_t>(file_row_number + r);
+						}
+						expr_input.SetCardinality(scan_chunk.size());
+						expr_it->second->ExecuteExpression(expr_input, chunk.data[c]);
+						continue;
+					}
+				}
 				auto row_id_data = FlatVector::GetData<int64_t>(chunk.data[c]);
 				for (idx_t r = 0; r < scan_chunk.size(); r++) {
 					row_id_data[r] = NumericCast<int64_t>(file_row_number + r);
