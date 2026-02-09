@@ -1,4 +1,4 @@
-# name: test/sql/sorted_table/merge_adjacent_sorted_macro_expression_transaction.test
+# name: test/sql/sorted_table/data_inlining_flush_sorted_macro_expression_transaction.test
 # description: Sort by a DuckLake macro to approximate space filling curve sorting within a transaction
 # group: [sorted_table]
 
