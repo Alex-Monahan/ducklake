@@ -3992,8 +3992,13 @@ string DuckLakeMetadataManager::InsertNewSchema(const DuckLakeSnapshot &snapshot
 
 vector<DuckLakeTableSizeInfo> DuckLakeMetadataManager::GetTableSizes(DuckLakeSnapshot snapshot) {
 	vector<DuckLakeTableSizeInfo> table_sizes;
-	auto result = Query(snapshot, R"(
-SELECT schema_id, table_id, table_name, table_uuid, data_file_info.file_count AS data_file_count, data_file_info.total_file_size AS data_total_size, delete_file_info.file_count AS delete_file_count, delete_file_info.total_file_size AS delete_total_size
+	auto result = transaction.Query(snapshot, R"(
+SELECT
+	schema_id, table_id, table_name, table_uuid,
+	data_file_info.file_count AS data_file_count,
+	data_file_info.total_file_size AS data_total_size,
+	delete_file_info.file_count AS delete_file_count,
+	delete_file_info.total_file_size AS delete_total_size
 FROM {METADATA_CATALOG}.ducklake_table tbl, LATERAL (
 	SELECT COUNT(*) file_count, SUM(file_size_bytes) total_file_size
 	FROM {METADATA_CATALOG}.ducklake_data_file df
