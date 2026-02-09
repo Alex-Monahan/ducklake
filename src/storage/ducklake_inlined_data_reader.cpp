@@ -190,8 +190,7 @@ AsyncResult DuckLakeInlinedDataReader::Scan(ClientContext &context, GlobalTableF
 					if (expr_it != expression_executors.end()) {
 						// Evaluate expressions
 						DataChunk expr_input;
-						expr_input.Initialize(Allocator::Get(context),
-						                      {scan_chunk.data[column_id].GetType()});
+						expr_input.Initialize(Allocator::Get(context), {scan_chunk.data[column_id].GetType()});
 						expr_input.Reset();
 						expr_input.data[0].Reference(scan_chunk.data[column_id]);
 						expr_input.SetCardinality(scan_chunk.size());

@@ -9,6 +9,7 @@
 #include "storage/ducklake_table_entry.hpp"
 #include "duckdb.hpp"
 #include "metadata_manager/postgres_metadata_manager.hpp"
+#include "metadata_manager/sqlite_metadata_manager.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/planner/filter/constant_filter.hpp"
 #include "duckdb/planner/filter/conjunction_filter.hpp"
@@ -33,6 +34,9 @@ unique_ptr<DuckLakeMetadataManager> DuckLakeMetadataManager::Create(DuckLakeTran
 	auto catalog_type = catalog.MetadataType();
 	if (catalog_type == "postgres" || catalog_type == "postgres_scanner") {
 		return make_uniq<PostgresMetadataManager>(transaction);
+	}
+	if (catalog_type == "sqlite_scanner") {
+		return make_uniq<SQLiteMetadataManager>(transaction);
 	}
 	return make_uniq<DuckLakeMetadataManager>(transaction);
 }
