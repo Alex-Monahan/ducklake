@@ -819,11 +819,19 @@ ORDER BY table_id;
 }
 
 string DuckLakeMetadataManager::GetFileSelectList(const string &prefix) {
-	auto result = StringUtil::Replace(
-	    "{PREFIX}.path, {PREFIX}.path_is_relative, {PREFIX}.file_size_bytes, {PREFIX}.footer_size", "{PREFIX}", prefix);
-	if (IsEncrypted()) {
-		result += ", " + prefix + ".encryption_key";
+	static const vector<string> column_list {
+	    "path", "path_is_relative", "file_size_bytes", "footer_size", "encryption_key",
+	};
+
+	auto count = column_list.size();
+	if (!IsEncrypted()) {
+		count -= 1;
 	}
+
+	auto result = StringUtil::Join(column_list, count, ", ", [&prefix](const string &column) {
+		return prefix + "." + column + " AS " + prefix + "_" + column;
+	});
+
 	return result;
 }
 
@@ -1392,7 +1400,7 @@ vector<DuckLakeFileListEntry> DuckLakeMetadataManager::GetTableInsertions(DuckLa
 	    StringUtil::Format(R"(
 SELECT %s
 FROM {METADATA_CATALOG}.ducklake_data_file data, (
-	SELECT NULL path, NULL path_is_relative, NULL file_size_bytes, NULL footer_size, NULL encryption_key
+	SELECT CAST(NULL AS VARCHAR) path, CAST(NULL AS BOOLEAN) path_is_relative, CAST(NULL AS BIGINT) file_size_bytes, CAST(NULL AS BIGINT) footer_size, CAST(NULL AS VARCHAR) encryption_key
 ) del
 WHERE data.table_id=%d AND data.begin_snapshot <= {SNAPSHOT_ID} AND (
 	(data.begin_snapshot >= %d) OR
@@ -1679,8 +1687,9 @@ vector<DuckLakeCompactionFileEntry> DuckLakeMetadataManager::GetFilesForCompacti
 	                          "data.end_snapshot, data.mapping_id, sr.schema_version , data.partial_max, "
 	                          "data.partition_id, partition_info.keys, " +
 	                          GetFileSelectList("data");
-	string delete_select_list = "del.data_file_id,del.delete_file_id, del.delete_count, del.begin_snapshot, "
-	                            "del.end_snapshot, del.partial_max, " +
+	string delete_select_list = "del.data_file_id AS del_data_file_id, del.delete_file_id AS del_delete_file_id, "
+	                            "del.delete_count, del.begin_snapshot AS del_begin_snapshot, del.end_snapshot AS "
+	                            "del_end_snapshot, del.partial_max AS del_partial_max, " +
 	                            GetFileSelectList("del");
 	string select_list = data_select_list + ", " + delete_select_list;
 	string deletion_threshold_clause;
@@ -2455,11 +2464,14 @@ shared_ptr<DuckLakeInlinedData> DuckLakeMetadataManager::TransformInlinedData(Qu
 
 static string GetProjection(const vector<string> &columns_to_read) {
 	string result;
+	idx_t i = 1;
 	for (auto &entry : columns_to_read) {
 		if (!result.empty()) {
 			result += ", ";
 		}
-		result += entry;
+		// alias to avoid duplicate name in PG
+		result += entry + StringUtil::Format(" AS col%d", i);
+		i++;
 	}
 	return result;
 }
@@ -2596,7 +2608,7 @@ WHERE schema_id = %d;)",
 		}
 	}
 	auto result = transaction.Query(StringUtil::Format(R"(
-SELECT s.path, s.path_is_relative, t.path, t.path_is_relative
+SELECT s.path AS s_path, s.path_is_relative AS s_path_is_relative, t.path AS t_path, t.path_is_relative AS t_path_is_relative
 FROM {METADATA_CATALOG}.ducklake_schema s
 JOIN {METADATA_CATALOG}.ducklake_table t
 USING (schema_id)
@@ -3980,8 +3992,8 @@ string DuckLakeMetadataManager::InsertNewSchema(const DuckLakeSnapshot &snapshot
 
 vector<DuckLakeTableSizeInfo> DuckLakeMetadataManager::GetTableSizes(DuckLakeSnapshot snapshot) {
 	vector<DuckLakeTableSizeInfo> table_sizes;
-	auto result = transaction.Query(snapshot, R"(
-SELECT schema_id, table_id, table_name, table_uuid, data_file_info.file_count, data_file_info.total_file_size, delete_file_info.file_count, delete_file_info.total_file_size
+	auto result = Query(snapshot, R"(
+SELECT schema_id, table_id, table_name, table_uuid, data_file_info.file_count AS data_file_count, data_file_info.total_file_size AS data_total_size, delete_file_info.file_count AS delete_file_count, delete_file_info.total_file_size AS delete_total_size
 FROM {METADATA_CATALOG}.ducklake_table tbl, LATERAL (
 	SELECT COUNT(*) file_count, SUM(file_size_bytes) total_file_size
 	FROM {METADATA_CATALOG}.ducklake_data_file df
