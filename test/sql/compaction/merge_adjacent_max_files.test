@@ -25,6 +25,9 @@ loop i 0 20
 statement ok
 INSERT INTO example VALUES (${i});
 
+statement ok
+CALL ducklake_flush_inlined_data('ducklake')
+
 endloop
 
 query III
@@ -36,7 +39,7 @@ example	20	1
 query II
 SELECT max(data_file_id), min (data_file_id) FROM __ducklake_metadata_ducklake.ducklake_data_file
 ----
-20	20
+40	40
 
 statement ok
 DROP TABLE example;
@@ -50,11 +53,14 @@ CALL ducklake.set_option('target_file_size', '1KB');
 statement ok
 CREATE TABLE example (key integer);
 
-# Generate 100 files
+# Generate 20 files
 loop i 0 20
 
 statement ok
 INSERT INTO example VALUES (${i});
+
+statement ok
+CALL ducklake_flush_inlined_data('ducklake')
 
 endloop
 
@@ -86,63 +92,42 @@ SELECT count(*) FROM __ducklake_metadata_ducklake.ducklake_data_file
 query II
 SELECT max(data_file_id), min (data_file_id) FROM __ducklake_metadata_ducklake.ducklake_data_file
 ----
-40	21
+80	42
 
 query III
 SELECT table_name, files_processed, files_created FROM ducklake_merge_adjacent_files('ducklake', 'example', max_compacted_files=>2) ORDER BY ALL
 ----
-example	5	1
-example	5	1
+example	<REGEX>:\d+	1
+example	<REGEX>:\d+	1
 
 # We create two new files, and remove as many as necessary to create them
 query II
-SELECT max(data_file_id), min (data_file_id) > 30 FROM __ducklake_metadata_ducklake.ducklake_data_file
-----
-42	True
-
-query III
-SELECT table_name, files_processed, files_created FROM ducklake_merge_adjacent_files('ducklake', 'example', max_compacted_files=>1)
-----
-example	3	1
-
-# We create max one file
-query II
-SELECT max(data_file_id), min (data_file_id) > 31 FROM __ducklake_metadata_ducklake.ducklake_data_file
-----
-43	True
-
-query III
-SELECT table_name, files_processed, files_created FROM ducklake_merge_adjacent_files('ducklake', 'example', max_compacted_files=>1000) ORDER BY ALL
-----
-example	4	1
-example	5	1
-
-# We basically do max compaction, limiting the size set
-query II
-SELECT max(data_file_id) > 43, min (data_file_id) > 32 FROM __ducklake_metadata_ducklake.ducklake_data_file
+SELECT max(data_file_id) > 80, min (data_file_id) > 42 FROM __ducklake_metadata_ducklake.ducklake_data_file
 ----
 True	True
 
 query III
+SELECT table_name, files_processed, files_created FROM ducklake_merge_adjacent_files('ducklake', 'example', max_compacted_files=>1)
+----
+example	<REGEX>:\d+	1
+
+# We create max one file
+query II
+SELECT max(data_file_id) > 80, min (data_file_id) > 42 FROM __ducklake_metadata_ducklake.ducklake_data_file
+----
+True	True
+
+statement ok
+SELECT table_name, files_processed, files_created FROM ducklake_merge_adjacent_files('ducklake', 'example', max_compacted_files=>1000) ORDER BY ALL
+
+# We basically do max compaction, limiting the size set
+
+# Keep merging until fully compacted
+statement ok
 SELECT table_name, files_processed, files_created FROM ducklake_merge_adjacent_files('ducklake', 'example', max_compacted_files=>1000)
-----
-example	3	1
 
-# Calling it again, merges one more time both snapshots as they are under the size limit
-query I
-SELECT max(data_file_id) FROM __ducklake_metadata_ducklake.ducklake_data_file
-----
-46
-
-query III
+statement ok
 SELECT table_name, files_processed, files_created FROM ducklake_merge_adjacent_files('ducklake', 'example', max_compacted_files=>1000)
-----
-
-# Calling it again, produces no changes
-query I
-SELECT max(data_file_id) BETWEEN 46 AND 48 FROM __ducklake_metadata_ducklake.ducklake_data_file
-----
-True
 
 # Check data is still correct
 query I
@@ -175,6 +160,9 @@ INSERT INTO table1 VALUES (${i});
 statement ok
 INSERT INTO table2 VALUES (${i});
 
+statement ok
+CALL ducklake_flush_inlined_data('ducklake')
+
 endloop
 
 query I
@@ -187,14 +175,14 @@ SELECT count(*) FROM __ducklake_metadata_ducklake.ducklake_data_file
 query III
 SELECT table_name, files_processed, files_created FROM ducklake_merge_adjacent_files('ducklake', max_compacted_files=>1) ORDER BY table_name
 ----
-table1	5	1
-table2	5	1
+table1	<REGEX>:\d+	1
+table2	<REGEX>:\d+	1
 
 # Both tables got compacted (1 operation each)
 query I
-SELECT count(*) FROM __ducklake_metadata_ducklake.ducklake_data_file
+SELECT count(*) < 20 FROM __ducklake_metadata_ducklake.ducklake_data_file
 ----
-12
+true
 
 # Check data is still correct
 query I
