@@ -1,5 +1,6 @@
 #include "common/ducklake_util.hpp"
 #include "duckdb/common/string_util.hpp"
+#include <cmath>
 #include "duckdb/parser/keyword_helper.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "storage/ducklake_metadata_manager.hpp"
@@ -158,14 +159,16 @@ string ToSQLString(DuckLakeMetadataManager &metadata_manager, const Value &value
 		ret += is_unnamed ? ")" : "}";
 		return ret;
 	}
-	case LogicalTypeId::FLOAT:
-		if (!value.FloatIsFinite(FloatValue::Get(value))) {
+	case LogicalTypeId::FLOAT: {
+		float fval = FloatValue::Get(value);
+		if (!Value::FloatIsFinite(fval) || (fval == 0.0f && std::signbit(fval))) {
 			return "'" + value.ToString() + "'::" + value_type;
 		}
 		return value.ToString();
+	}
 	case LogicalTypeId::DOUBLE: {
 		double val = DoubleValue::Get(value);
-		if (!value.DoubleIsFinite(val)) {
+		if (!Value::DoubleIsFinite(val) || (val == 0.0 && std::signbit(val))) {
 			return "'" + value.ToString() + "'::" + value_type;
 		}
 		return value.ToString();
