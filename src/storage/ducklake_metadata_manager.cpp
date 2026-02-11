@@ -969,8 +969,8 @@ string DuckLakeMetadataManager::CastStatsToTarget(const string &stats, const Log
 	return stats;
 }
 
-string DuckLakeMetadataManager::CastColumnToTarget(const string &stats, const LogicalType &type) {
-	return stats + "::" + type.ToString();
+string DuckLakeMetadataManager::CastColumnToTarget(const string &column, const LogicalType &type) {
+	return column + "::" + type.ToString();
 }
 
 string DuckLakeMetadataManager::GenerateConstantFilter(const ConstantFilter &constant_filter, const LogicalType &type,

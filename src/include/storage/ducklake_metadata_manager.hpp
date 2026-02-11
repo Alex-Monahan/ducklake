@@ -106,7 +106,7 @@ public:
 	virtual bool TypeIsNativelySupported(const LogicalType &type);
 
 	virtual string GetColumnTypeInternal(const LogicalType &column_type);
-	virtual string CastColumnToTarget(const string &stats, const LogicalType &type);
+	virtual string CastColumnToTarget(const string &column, const LogicalType &type);
 
 	DuckLakeMetadataManager &Get(DuckLakeTransaction &transaction);
 
