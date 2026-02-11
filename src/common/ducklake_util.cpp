@@ -140,10 +140,13 @@ string ToSQLString(DuckLakeMetadataManager &metadata_manager, const Value &value
 		return ToSQLString(metadata_manager, val);
 	}
 	case LogicalTypeId::STRUCT: {
-		bool is_unnamed = StructType::IsUnnamed(value.type());
-		string ret = is_unnamed ? "(" : "{";
 		auto &child_types = StructType::GetChildTypes(value.type());
 		auto &struct_values = StructValue::GetChildren(value);
+		if (struct_values.empty()) {
+			return "NULL";
+		}
+		bool is_unnamed = StructType::IsUnnamed(value.type());
+		string ret = is_unnamed ? "(" : "{";
 		for (idx_t i = 0; i < struct_values.size(); i++) {
 			auto &name = child_types[i].first;
 			auto &child = struct_values[i];
@@ -204,6 +207,31 @@ string ToSQLString(DuckLakeMetadataManager &metadata_manager, const Value &value
 			}
 		}
 		ret += "]";
+		return ret;
+	}
+	case LogicalTypeId::MAP: {
+		if (!metadata_manager.TypeIsNativelySupported(value.type())) {
+			return value.ToString();
+		}
+		string ret = "MAP(";
+		auto &map_values = MapValue::GetChildren(value);
+		ret += "[";
+		for (idx_t i = 0; i < map_values.size(); i++) {
+			if (i > 0) {
+				ret += ", ";
+			}
+			auto &map_children = StructValue::GetChildren(map_values[i]);
+			ret += ToSQLString(metadata_manager, map_children[0]);
+		}
+		ret += "], [";
+		for (idx_t i = 0; i < map_values.size(); i++) {
+			if (i > 0) {
+				ret += ", ";
+			}
+			auto &map_children = StructValue::GetChildren(map_values[i]);
+			ret += ToSQLString(metadata_manager, map_children[1]);
+		}
+		ret += "])";
 		return ret;
 	}
 	case LogicalTypeId::UNION: {
