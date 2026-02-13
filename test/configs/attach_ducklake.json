@@ -622,7 +622,7 @@
       ]
     },
     {
-        "reason": "GEOMETRY limitations",
+        "reason": "FIXME: GEOMETRY limitations (should be fixed at some point)",
         "paths": [
             "test/sql/types/geo/geometry_stats.test",
             "test/sql/types/geo/geometry_shred_list.test",
