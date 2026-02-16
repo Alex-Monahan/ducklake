@@ -973,8 +973,8 @@ string DuckLakeMetadataManager::CastValueToTarget(const Value &val, const Logica
 }
 
 string DuckLakeMetadataManager::CastStatsToTarget(const string &stats, const LogicalType &type) {
-	// we only need to cast numerics
-	if (type.IsNumeric()) {
+	// we need to cast numerics and temporals for correct comparison
+	if (RequiresValueComparison(type)) {
 		return "TRY_CAST(" + stats + " AS " + type.ToString() + ")";
 	}
 	return stats;
