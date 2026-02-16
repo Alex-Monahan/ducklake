@@ -116,9 +116,13 @@ string ToSQLString(DuckLakeMetadataManager &metadata_manager, const Value &value
 	case LogicalTypeId::TIMESTAMP_SEC:
 	case LogicalTypeId::TIMESTAMP_MS:
 	case LogicalTypeId::TIMESTAMP_NS:
-	case LogicalTypeId::INTERVAL:
 	case LogicalTypeId::BLOB:
 		return "'" + value.ToString() + "'::" + value_type;
+	case LogicalTypeId::INTERVAL: {
+		auto interval = IntervalValue::Get(value);
+		return StringUtil::Format("'%d months %d days %lld microseconds'::%s", interval.months, interval.days,
+		                          interval.micros, value_type);
+	}
 	case LogicalTypeId::VARCHAR:
 	case LogicalTypeId::ENUM: {
 		auto str_val = value.ToString();
