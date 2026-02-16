@@ -2024,6 +2024,15 @@ string DuckLakeMetadataManager::GetColumnType(const DuckLakeColumnInfo &col) {
 	}
 }
 
+static bool HasInlinedSystemColumnConflict(const vector<DuckLakeColumnInfo> &columns) {
+	for (auto &col : columns) {
+		if (col.name == "row_id" || col.name == "begin_snapshot" || col.name == "end_snapshot") {
+			return true;
+		}
+	}
+	return false;
+}
+
 string DuckLakeMetadataManager::GetInlinedTableQuery(const DuckLakeTableInfo &table, const string &table_name) {
 	string columns;
 
@@ -2111,6 +2120,10 @@ string DuckLakeMetadataManager::WriteNewInlinedTables(DuckLakeSnapshot commit_sn
 				auto &tbl = table_entry->Cast<DuckLakeTableEntry>();
 				table_with_columns.columns = tbl.GetTableColumns();
 			}
+		}
+		// FIXME: we are skipping columns that have conflicting names, we should resolve this
+		if (HasInlinedSystemColumnConflict(table_with_columns.columns)) {
+			continue;
 		}
 		GetInlinedTableQueries(commit_snapshot, table_with_columns, inlined_tables, inlined_table_queries);
 	}
@@ -3181,7 +3194,8 @@ FROM {METADATA_CATALOG}.ducklake_snapshot
 WHERE snapshot_id = %llu;)",
 		                                              val.DefaultCastAs(LogicalType::UBIGINT).GetValue<idx_t>()));
 	} else if (StringUtil::CIEquals(unit, "timestamp")) {
-		result = transaction.Query(StringUtil::Format(R"(
+		result = transaction.Query(StringUtil::Format(
+		    R"(
 SELECT snapshot_id, schema_version, next_catalog_id, next_file_id
 FROM {METADATA_CATALOG}.ducklake_snapshot
 WHERE snapshot_id = (
@@ -3190,8 +3204,7 @@ WHERE snapshot_id = (
 	WHERE snapshot_time %s= %s
 	ORDER BY snapshot_time %s
 	LIMIT 1);)",
-		                                  timestamp_condition, val.DefaultCastAs(LogicalType::VARCHAR).ToSQLString(),
-		                                  timestamp_order));
+		    timestamp_condition, val.DefaultCastAs(LogicalType::VARCHAR).ToSQLString(), timestamp_order));
 	} else {
 		throw InvalidInputException("Unsupported AT clause unit - %s", unit);
 	}
