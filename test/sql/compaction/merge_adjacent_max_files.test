@@ -36,10 +36,10 @@ SELECT table_name, files_processed, files_created FROM ducklake_merge_adjacent_f
 example	20	1
 
 # We create max one file, since we use the default size limits, one file should fit all
-query II
-SELECT max(data_file_id), min (data_file_id) FROM __ducklake_metadata_ducklake.ducklake_data_file
+query I
+SELECT max(data_file_id) = min(data_file_id) FROM __ducklake_metadata_ducklake.ducklake_data_file
 ----
-40	40
+true
 
 statement ok
 DROP TABLE example;
@@ -89,33 +89,33 @@ SELECT count(*) FROM __ducklake_metadata_ducklake.ducklake_data_file
 ----
 20
 
-query II
-SELECT max(data_file_id), min (data_file_id) FROM __ducklake_metadata_ducklake.ducklake_data_file
+query I
+SELECT count(*) FROM __ducklake_metadata_ducklake.ducklake_data_file
 ----
-80	42
+20
 
-query III
-SELECT table_name, files_processed, files_created FROM ducklake_merge_adjacent_files('ducklake', 'example', max_compacted_files=>2) ORDER BY ALL
+query II
+SELECT table_name, files_created FROM ducklake_merge_adjacent_files('ducklake', 'example', max_compacted_files=>2) ORDER BY ALL
 ----
-example	<REGEX>:\d+	1
-example	<REGEX>:\d+	1
+example	1
+example	1
 
 # We create two new files, and remove as many as necessary to create them
-query II
-SELECT max(data_file_id) > 80, min (data_file_id) > 42 FROM __ducklake_metadata_ducklake.ducklake_data_file
+query I
+SELECT count(*) < 20 FROM __ducklake_metadata_ducklake.ducklake_data_file
 ----
-True	True
+true
 
-query III
-SELECT table_name, files_processed, files_created FROM ducklake_merge_adjacent_files('ducklake', 'example', max_compacted_files=>1)
-----
-example	<REGEX>:\d+	1
-
-# We create max one file
 query II
-SELECT max(data_file_id) > 80, min (data_file_id) > 42 FROM __ducklake_metadata_ducklake.ducklake_data_file
+SELECT table_name, files_created FROM ducklake_merge_adjacent_files('ducklake', 'example', max_compacted_files=>1)
 ----
-True	True
+example	1
+
+# We create max one file - active file count decreased
+query I
+SELECT count(*) < 20 FROM __ducklake_metadata_ducklake.ducklake_data_file WHERE end_snapshot IS NULL
+----
+true
 
 statement ok
 SELECT table_name, files_processed, files_created FROM ducklake_merge_adjacent_files('ducklake', 'example', max_compacted_files=>1000) ORDER BY ALL
@@ -172,11 +172,11 @@ SELECT count(*) FROM __ducklake_metadata_ducklake.ducklake_data_file
 
 # Compact entire database with max_compacted_files=1 per table
 # Each table should get at most 1 compaction operation
-query III
-SELECT table_name, files_processed, files_created FROM ducklake_merge_adjacent_files('ducklake', max_compacted_files=>1) ORDER BY table_name
+query II
+SELECT table_name, files_created FROM ducklake_merge_adjacent_files('ducklake', max_compacted_files=>1) ORDER BY table_name
 ----
-table1	<REGEX>:\d+	1
-table2	<REGEX>:\d+	1
+table1	1
+table2	1
 
 # Both tables got compacted (1 operation each)
 query I

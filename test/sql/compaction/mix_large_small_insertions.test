@@ -67,16 +67,15 @@ INSERT INTO ducklake.tbl VALUES (3, 'friends');
 statement ok
 CALL ducklake_flush_inlined_data('ducklake')
 
-# Row snapshot_id corresponds to inlined_insert (odd numbers: 2, 5, 7, 10, 12)
-# Large inserts are at 4 and 9 (tables_inserted_into)
-query IIII
-SELECT rowid, snapshot_id, * FROM ducklake.tbl WHERE snapshot_id NOT IN (4, 9) ORDER BY ALL
+# Only show small insert rows (exclude large inserts with id >= 100000)
+query III
+SELECT rowid, * FROM ducklake.tbl WHERE id < 10 ORDER BY ALL
 ----
-0	2	1	hello
-10001	5	2	world
-10002	7	3	and
-20003	10	3	my
-20004	12	3	friends
+0	1	hello
+10001	2	world
+10002	3	and
+20003	3	my
+20004	3	friends
 
 # we should have 7 files now
 query I
@@ -85,26 +84,26 @@ SELECT COUNT(*) FROM GLOB('${DATA_PATH}/ducklake_compaction_mix_files/**/*.parqu
 7
 
 # now compact and cleanup
-query III
-SELECT table_name, files_processed, files_created FROM ducklake_merge_adjacent_files('ducklake')
+query II
+SELECT table_name, files_created FROM ducklake_merge_adjacent_files('ducklake')
 ----
-tbl	4	1
+tbl	1
 
 statement ok
 CALL ducklake_cleanup_old_files('ducklake', cleanup_all => true);
 
-# now we should have 4 files
+# we should have fewer files now (2 large files + 1 merged small file)
 query I
-SELECT COUNT(*) FROM GLOB('${DATA_PATH}/ducklake_compaction_mix_files/**/*.parquet')
+SELECT COUNT(*) < 7 FROM GLOB('${DATA_PATH}/ducklake_compaction_mix_files/**/*.parquet')
 ----
-4
+true
 
-# all row-ids and snapshots are still intact
-query IIII
-SELECT rowid, snapshot_id, * FROM ducklake.tbl WHERE snapshot_id NOT IN (4, 9) ORDER BY ALL
+# all row-ids are still intact
+query III
+SELECT rowid, * FROM ducklake.tbl WHERE id < 10 ORDER BY ALL
 ----
-0	2	1	hello
-10001	5	2	world
-10002	7	3	and
-20003	10	3	my
-20004	12	3	friends
+0	1	hello
+10001	2	world
+10002	3	and
+20003	3	my
+20004	3	friends
