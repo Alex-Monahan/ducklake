@@ -2327,16 +2327,6 @@ WHERE table_id = %d AND schema_version=(
 			batch_query += append_query;
 		}
 	}
-	// We need to handle new tables that have created new inlined tables in the same commit
-	// Since creating or inserting data to an inline table also creates a new snapshot
-	for (auto table_id : pre_created_inlined_tables_with_data) {
-		for (auto &new_table : new_tables) {
-			if (new_table.id.index == table_id) {
-				commit_snapshot.schema_version++;
-				break;
-			}
-		}
-	}
 	return batch_query;
 }
 

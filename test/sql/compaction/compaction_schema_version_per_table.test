@@ -51,7 +51,7 @@ SELECT COUNT(*) FROM ducklake_list_files('ducklake', 'table_to_compact')
 query III
 FROM __ducklake_metadata_ducklake.ducklake_schema_versions
 ----
-1	2	1
+1	1	1
 
 
 statement ok
@@ -92,12 +92,12 @@ CALL ducklake_flush_inlined_data('ducklake')
 
 # table_to_compact (id 1)  only has one schema still
 # another_table (id 3)  has two schemas
-query III
-FROM __ducklake_metadata_ducklake.ducklake_schema_versions
+query II
+SELECT schema_version, table_id FROM __ducklake_metadata_ducklake.ducklake_schema_versions
 ----
-1	2	1
-7	4	3
-14	5	3
+1	1
+3	3
+4	3
 
 statement ok
 INSERT INTO ducklake.table_to_compact VALUES (9), (10);

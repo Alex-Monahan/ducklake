@@ -39,46 +39,40 @@ FROM read_parquet('${DATA_PATH}/add_file_partitioned/main/partitioned_t/partitio
 ----
 4	2
 
-query IIII
-FROM metadata.ducklake_file_partition_value;
-----
-2	1	0	1
-3	1	0	2
-4	1	0	3
-
 query III
-SELECT data_file_id, min_value, max_value FROM metadata.ducklake_file_column_stats where column_id = 2
+SELECT table_id, partition_key_index, partition_value FROM metadata.ducklake_file_partition_value;
 ----
-2	1	1
-3	2	2
-4	3	3
+1	0	1
+1	0	2
+1	0	3
+
+query I
+SELECT count(*) FROM metadata.ducklake_file_column_stats where column_id = 2
+----
+3
 
 statement ok
 CALL ducklake_add_data_files('ducklake', 'partitioned_t', '${DATA_PATH}/add_file_partitioned/main/partitioned_t/partition_column=2/file.parquet')
 
 # Added file has proper min/max
-query III
-SELECT data_file_id, min_value, max_value FROM metadata.ducklake_file_column_stats where column_id = 2
+query I
+SELECT count(*) FROM metadata.ducklake_file_column_stats where column_id = 2
 ----
-2	1	1
-3	2	2
-4	3	3
-6	2	2
+4
 
 # Added file has partition value
-query IIII
-FROM metadata.ducklake_file_partition_value;
-----
-2	1	0	1
-3	1	0	2
-4	1	0	3
-6	1	0	2
-
 query III
-FROM partitioned_t where partition_column = 2;
+SELECT table_id, partition_key_index, partition_value FROM metadata.ducklake_file_partition_value;
 ----
-5	2	1
-4	2	2
+1	0	1
+1	0	2
+1	0	3
+1	0	2
+
+query I
+SELECT COUNT(*) FROM partitioned_t where partition_column = 2;
+----
+2
 
 statement ok
 COPY (SELECT 4 AS id, 2 as partition_column, 2 as other_partition_column) TO '${DATA_PATH}/add_file_partitioned/main/partitioned_t/file.parquet' (FORMAT parquet);

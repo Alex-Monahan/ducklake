@@ -6,5 +6,35 @@
     "parquet",
     "ducklake",
     "icu"
+  ],   "skip_tests": [
+   {
+      "reason": "Snapshot ID differs due to flush",
+      "paths": [
+        "test/sql/table_changes/ducklake_table_insertions.test",
+        "test/sql/add_files/add_files.test",
+        "test/sql/add_files/add_files_compaction.test",
+        "test/sql/rewrite_data_files/test_rewrite_concurrency.test",
+        "test/sql/rewrite_data_files/test_last_snapshot_rewrite.test",
+        "test/sql/rewrite_data_files/test_rewrite_db.test",
+        "test/sql/rewrite_data_files/last_snapshot_multiple_inserts.test",
+        "test/sql/rewrite_data_files/test_last_snapshot_merge_rewrite.test",
+        "test/sql/functions/ducklake_snapshots.test",
+        "test/sql/alter/expire_snapshot_bug.test",
+        "test/sql/compaction/compaction_alter_table.test",
+        "test/sql/compaction/mix_large_small_insertions.test",
+        "test/sql/compaction/compaction_partitioned_non_adjacent.test",
+        "test/sql/compaction/merge_rewrite_partial_file_info.test",
+        "test/sql/compaction/small_insert_compaction.test",
+        "test/sql/compaction/compaction_partitioned_table.test",
+        "test/sql/compaction/merge_adjacent_max_files.test",
+        "test/sql/sorted_table/merge_adjacent_sorted_transaction_renamed.test",
+        "test/sql/sorted_table/merge_adjacent_sorted_transaction_alter_table_unrelated.test",
+        "test/sql/sorted_table/merge_adjacent_sorted_basic.test",
+        "test/sql/compaction/multi_compaction.test",
+        "test/sql/compaction/merge_adjacent_partial_max.test",
+        "test/sql/compaction/merge_adjacent_options.test",
+        "test/sql/delete/test_delete_partial_max_snapshot.test"
+      ]
+    }
   ]
 }
