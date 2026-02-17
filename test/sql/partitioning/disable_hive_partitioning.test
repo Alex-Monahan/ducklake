@@ -13,7 +13,7 @@ test-env DATA_PATH __TEST_DIR__
 
 
 statement ok
-ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/ducklake_partition_use_hive', METADATA_CATALOG 'ducklake_metadata')
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/ducklake_partition_use_hive', METADATA_CATALOG 'ducklake_metadata', DATA_INLINING_ROW_LIMIT 0)
 
 statement ok
 USE ducklake
@@ -33,21 +33,19 @@ ALTER TABLE partitioned_tbl SET PARTITIONED BY (part_key);
 statement ok
 INSERT INTO partitioned_tbl SELECT i%2, concat('thisisastring_', i) FROM range(5) t(i)
 
-statement ok
-CALL ducklake_flush_inlined_data('ducklake')
-
 # This is partitioned
-query I
-SELECT COUNT (*) FROM '${DATA_PATH}/ducklake_partition_use_hive/main/partitioned_tbl/part_key=0/*.parquet'
+query II
+FROM '${DATA_PATH}/ducklake_partition_use_hive/main/partitioned_tbl/part_key=0/*.parquet'
 ----
-3
+0	thisisastring_0
+0	thisisastring_2
+0	thisisastring_4
 
 statement ok
 ALTER TABLE hiveless_partitioned_tbl SET PARTITIONED BY (part_key);
 
-# Insert more than 10 rows to bypass inlining (direct file write respects hive_file_pattern=False)
 statement ok
-INSERT INTO hiveless_partitioned_tbl SELECT i%2, concat('thisisastring_', i) FROM range(20) t(i)
+INSERT INTO hiveless_partitioned_tbl SELECT i%2, concat('thisisastring_', i) FROM range(5) t(i)
 
 statement error
 FROM '${DATA_PATH}/ducklake_partition_use_hive/main/hiveless_partitioned_tbl/part_key=0/*.parquet'
@@ -59,17 +57,18 @@ CALL ducklake.set_option('hive_file_pattern', False, table_name => 'partitioned_
 
 
 # What if we now insert more data into our partitioned table
-# Insert more than 10 rows to bypass inlining (direct file write respects hive_file_pattern=False)
 statement ok
-INSERT INTO partitioned_tbl SELECT i%2, concat('thisisastring_', i) FROM range(20) t(i)
+INSERT INTO partitioned_tbl SELECT i%2, concat('thisisastring_', i) FROM range(5) t(i)
 
-# Data remains the same (only original 5 rows in hive-style files, with internal columns from flush)
-query I
-SELECT COUNT(*) FROM '${DATA_PATH}/ducklake_partition_use_hive/main/partitioned_tbl/part_key=0/*.parquet'
+# Data remains the same
+query II
+FROM '${DATA_PATH}/ducklake_partition_use_hive/main/partitioned_tbl/part_key=0/*.parquet'
 ----
-3
+0	thisisastring_0
+0	thisisastring_2
+0	thisisastring_4
 
-# But we can query all data normally (original 5 + new 20 = 25 rows, 13 with part_key=0)
+# But we can query it in its totality normally
 query II
 FROM partitioned_tbl where part_key = 0
 ----
@@ -79,10 +78,3 @@ FROM partitioned_tbl where part_key = 0
 0	thisisastring_0
 0	thisisastring_2
 0	thisisastring_4
-0	thisisastring_6
-0	thisisastring_8
-0	thisisastring_10
-0	thisisastring_12
-0	thisisastring_14
-0	thisisastring_16
-0	thisisastring_18

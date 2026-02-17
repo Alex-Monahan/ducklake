@@ -20,7 +20,7 @@ test-env DUCKLAKE_CONNECTION __TEST_DIR__/compaction_multiple_rename_column.db
 test-env DATA_PATH __TEST_DIR__
 
 statement ok
-ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/compaction_multiple_rename_column')
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/compaction_multiple_rename_column', DATA_INLINING_ROW_LIMIT 0)
 
 # Create table with user_id column (schema version 1)
 statement ok
@@ -37,12 +37,12 @@ ALTER TABLE ducklake.test RENAME COLUMN user_id TO temp;
 statement ok
 ALTER TABLE ducklake.test RENAME COLUMN temp TO user_id;
 
-# INSERT DATA AT SCHEMA VERSION 3 - with enough rows to create files directly
+# INSERT DATA AT SCHEMA VERSION 3 - files are created at this schema version
 statement ok
-INSERT INTO ducklake.test SELECT i, i*100 FROM range(15) t(i);
+INSERT INTO ducklake.test VALUES (1, 100);
 
 statement ok
-INSERT INTO ducklake.test SELECT i+15, i*100+15 FROM range(15) t(i);
+INSERT INTO ducklake.test VALUES (2, 200);
 
 # Rename user_id -> distinct_id (schema version 4)
 # With the bug, WriteDroppedColumns sets end_snapshot on ALL entries with this column_id
@@ -57,7 +57,7 @@ statement ok
 DETACH ducklake;
 
 statement ok
-ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/compaction_multiple_rename_column')
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/compaction_multiple_rename_column', DATA_INLINING_ROW_LIMIT 0)
 
 # Compact the files created at schema version 3
 # This loads the corrupted schema where both 'user_id' entries are visible
@@ -69,10 +69,7 @@ test	2	1
 
 # Verify current data is correct
 query II
-SELECT id, distinct_id FROM ducklake.test ORDER BY id LIMIT 5;
+SELECT id, distinct_id FROM ducklake.test ORDER BY id;
 ----
-0	0
 1	100
 2	200
-3	300
-4	400

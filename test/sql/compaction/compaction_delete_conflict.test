@@ -13,7 +13,7 @@ test-env DATA_PATH __TEST_DIR__
 
 
 statement ok
-ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/ducklake_conflicts_compaction_files')
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/ducklake_conflicts_compaction_files', DATA_INLINING_ROW_LIMIT 0)
 
 statement ok
 SET immediate_transaction_mode=true
@@ -21,15 +21,11 @@ SET immediate_transaction_mode=true
 statement ok
 CREATE TABLE ducklake.test(i INTEGER);
 
-# Insert more than 10 rows per insert so flush creates files
 statement ok
-INSERT INTO ducklake.test SELECT * FROM range(1, 12);
+INSERT INTO ducklake.test VALUES (1);
 
 statement ok
-INSERT INTO ducklake.test SELECT * FROM range(12, 23);
-
-statement ok
-CALL ducklake_flush_inlined_data('ducklake')
+INSERT INTO ducklake.test VALUES (2);
 
 # try to commit a delete after a compaction: conflict
 statement ok con1
@@ -55,13 +51,10 @@ COMMIT
 
 
 statement ok
-INSERT INTO ducklake.test SELECT * FROM range(23, 34);
+INSERT INTO ducklake.test VALUES (3);
 
 statement ok
-INSERT INTO ducklake.test SELECT * FROM range(34, 45);
-
-statement ok
-CALL ducklake_flush_inlined_data('ducklake')
+INSERT INTO ducklake.test VALUES (4);
 
 # try to commit a compaction after a deletion: conflict
 statement ok con1
@@ -87,13 +80,10 @@ COMMIT
 
 
 statement ok
-INSERT INTO ducklake.test SELECT * FROM range(45, 56);
+INSERT INTO ducklake.test VALUES (5);
 
 statement ok
-INSERT INTO ducklake.test SELECT * FROM range(56, 67);
-
-statement ok
-CALL ducklake_flush_inlined_data('ducklake')
+INSERT INTO ducklake.test VALUES (6);
 
 # two transactions both try to compact: conflict
 statement ok con1
@@ -121,13 +111,10 @@ COMMIT
 
 
 statement ok
-INSERT INTO ducklake.test SELECT * FROM range(67, 78);
+INSERT INTO ducklake.test VALUES (7);
 
 statement ok
-INSERT INTO ducklake.test SELECT * FROM range(78, 89);
-
-statement ok
-CALL ducklake_flush_inlined_data('ducklake')
+INSERT INTO ducklake.test VALUES (8);
 
 # compaction and insert: no conflict
 statement ok con1
@@ -142,7 +129,7 @@ SELECT table_name, files_processed, files_created FROM ducklake_merge_adjacent_f
 test	3	1
 
 statement ok con2
-INSERT INTO ducklake.test SELECT * FROM range(89, 100);
+INSERT INTO ducklake.test VALUES (9);
 
 statement ok con1
 COMMIT
@@ -153,58 +140,8 @@ COMMIT
 query I
 SELECT * FROM ducklake.test ORDER BY ALL
 ----
-45
-46
-47
-48
-49
-50
-51
-52
-53
-54
-55
-56
-57
-58
-59
-60
-61
-62
-63
-64
-65
-66
-67
-68
-69
-70
-71
-72
-73
-74
-75
-76
-77
-78
-79
-80
-81
-82
-83
-84
-85
-86
-87
-88
-89
-90
-91
-92
-93
-94
-95
-96
-97
-98
-99
+5
+6
+7
+8
+9
