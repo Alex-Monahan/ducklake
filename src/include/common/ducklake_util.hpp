@@ -37,6 +37,9 @@ public:
 	static string JoinPath(FileSystem &fs, const string &a, const string &b);
 
 	static DynamicFilter *GetOptionalDynamicFilter(const TableFilter &filter);
+
+	//! Returns true if the given column name conflicts with inlined data system columns
+	static bool IsInlinedSystemColumn(const string &name);
 };
 
 } // namespace duckdb

@@ -149,9 +149,6 @@ bool DuckLakeInlinedDataReader::TryInitializeScan(ClientContext &context, Global
 			}
 			filter.delete_data->deleted_rows = std::move(deleted_ordinals);
 		}
-		for (auto &entry : expression_map) {
-			expression_executors[entry.first] = make_uniq<ExpressionExecutor>(context, *entry.second);
-		}
 		data->data->InitializeScan(state);
 	} else {
 		// scanning from transaction-local data - we already have the data
@@ -176,11 +173,10 @@ bool DuckLakeInlinedDataReader::TryInitializeScan(ClientContext &context, Global
 			scan_column_ids.push_back(0);
 		}
 		scan_chunk.Initialize(context, scan_types);
-		// Initialize expression executors for transaction-local data
-		for (auto &entry : expression_map) {
-			expression_executors[entry.first] = make_uniq<ExpressionExecutor>(context, *entry.second);
-		}
 		data->data->InitializeScan(state, scan_column_ids);
+	}
+	for (auto &entry : expression_map) {
+		expression_executors[entry.first] = make_uniq<ExpressionExecutor>(context, *entry.second);
 	}
 	return true;
 }

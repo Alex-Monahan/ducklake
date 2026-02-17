@@ -2026,7 +2026,7 @@ string DuckLakeMetadataManager::GetColumnType(const DuckLakeColumnInfo &col) {
 
 static bool HasInlinedSystemColumnConflict(const vector<DuckLakeColumnInfo> &columns) {
 	for (auto &col : columns) {
-		if (col.name == "row_id" || col.name == "begin_snapshot" || col.name == "end_snapshot") {
+		if (DuckLakeUtil::IsInlinedSystemColumn(col.name)) {
 			return true;
 		}
 	}

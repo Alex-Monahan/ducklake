@@ -28,8 +28,7 @@ namespace duckdb {
 
 static bool HasInlinedSystemColumnConflict(const ColumnList &columns) {
 	for (auto &col : columns.Logical()) {
-		auto &name = col.Name();
-		if (name == "row_id" || name == "begin_snapshot" || name == "end_snapshot") {
+		if (DuckLakeUtil::IsInlinedSystemColumn(col.Name())) {
 			return true;
 		}
 	}

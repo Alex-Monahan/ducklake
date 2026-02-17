@@ -94,6 +94,29 @@ string DuckLakeUtil::StatsToString(const string &text) {
 	return DuckLakeUtil::SQLLiteralToString(text);
 }
 
+static string EscapeVarcharForSQL(const string &str_val) {
+	string ret;
+	bool concat = false;
+	for (auto c : str_val) {
+		switch (c) {
+		case '\0':
+			concat = true;
+			ret += "', chr(0), '";
+			break;
+		case '\'':
+			ret += "''";
+			break;
+		default:
+			ret += c;
+			break;
+		}
+	}
+	if (concat) {
+		return "CONCAT('" + ret + "')";
+	}
+	return "'" + ret + "'";
+}
+
 string ToSQLString(DuckLakeMetadataManager &metadata_manager, const Value &value) {
 	if (value.IsNull()) {
 		return value.ToString();
@@ -126,29 +149,8 @@ string ToSQLString(DuckLakeMetadataManager &metadata_manager, const Value &value
 		                          interval.micros, value_type);
 	}
 	case LogicalTypeId::VARCHAR:
-	case LogicalTypeId::ENUM: {
-		auto str_val = value.ToString();
-		string ret;
-		bool concat = false;
-		for (auto c : str_val) {
-			switch (c) {
-			case '\0':
-				concat = true;
-				ret += "', chr(0), '";
-				break;
-			case '\'':
-				ret += "''";
-				break;
-			default:
-				ret += c;
-				break;
-			}
-		}
-		if (concat) {
-			return "CONCAT('" + ret + "')";
-		}
-		return "'" + ret + "'";
-	}
+	case LogicalTypeId::ENUM:
+		return EscapeVarcharForSQL(value.ToString());
 	case LogicalTypeId::VARIANT: {
 		Vector tmp(value);
 		RecursiveUnifiedVectorFormat format;
@@ -295,28 +297,7 @@ string DuckLakeUtil::ValueToSQL(DuckLakeMetadataManager &metadata_manager, Clien
 		if (!metadata_manager.TypeIsNativelySupported(LogicalType::VARCHAR)) {
 			return ToByteaHexLiteral(str_val);
 		}
-		string ret;
-		bool concat = false;
-		for (auto c : str_val) {
-			switch (c) {
-			case '\0':
-				// need to concat to place a null byte
-				concat = true;
-				ret += "', chr(0), '";
-				break;
-			case '\'':
-				ret += "''";
-				break;
-			default:
-				ret += c;
-				break;
-			}
-		}
-		if (concat) {
-			return "CONCAT('" + ret + "')";
-		} else {
-			return "'" + ret + "'";
-		}
+		return EscapeVarcharForSQL(str_val);
 	}
 	case LogicalTypeId::BLOB: {
 		if (!metadata_manager.TypeIsNativelySupported(LogicalType::BLOB)) {
@@ -385,6 +366,10 @@ DynamicFilter *DuckLakeUtil::GetOptionalDynamicFilter(const TableFilter &filter)
 		return nullptr;
 	}
 	return &dynamic;
+}
+
+bool DuckLakeUtil::IsInlinedSystemColumn(const string &name) {
+	return name == "row_id" || name == "begin_snapshot" || name == "end_snapshot";
 }
 
 } // namespace duckdb
