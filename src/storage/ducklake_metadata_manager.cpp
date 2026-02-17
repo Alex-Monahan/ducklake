@@ -2103,20 +2103,23 @@ string DuckLakeMetadataManager::WriteNewInlinedTables(DuckLakeSnapshot commit_sn
 			continue;
 		}
 		// If columns are empty (e.g., for renamed tables), fetch them from the catalog
-		DuckLakeTableInfo table_with_columns = table;
-		if (table_with_columns.columns.empty()) {
+		const DuckLakeTableInfo *table_ptr = &table;
+		DuckLakeTableInfo table_with_columns;
+		if (table.columns.empty()) {
 			auto current_snapshot = transaction.GetSnapshot();
 			auto table_entry = catalog.GetEntryById(transaction, current_snapshot, table.id);
 			if (table_entry) {
 				auto &tbl = table_entry->Cast<DuckLakeTableEntry>();
+				table_with_columns = table;
 				table_with_columns.columns = tbl.GetTableColumns();
+				table_ptr = &table_with_columns;
 			}
 		}
 		// FIXME: we are skipping columns that have conflicting names, we should resolve this
-		if (DuckLakeUtil::HasInlinedSystemColumnConflict(table_with_columns.columns)) {
+		if (DuckLakeUtil::HasInlinedSystemColumnConflict(table_ptr->columns)) {
 			continue;
 		}
-		GetInlinedTableQueries(commit_snapshot, table_with_columns, inlined_tables, inlined_table_queries);
+		GetInlinedTableQueries(commit_snapshot, *table_ptr, inlined_tables, inlined_table_queries);
 	}
 	if (inlined_tables.empty()) {
 		return {};
@@ -2226,13 +2229,11 @@ string DuckLakeMetadataManager::WriteNewInlinedData(DuckLakeSnapshot &commit_sna
 
 	auto context_ptr = transaction.context.lock();
 	auto &context = *context_ptr;
-	unordered_set<idx_t> pre_created_inlined_tables_with_data;
 	for (auto &entry : new_data) {
 		string inlined_table_name;
 		for (auto &inlined_table : new_inlined_data_tables_result) {
 			if (inlined_table.id == entry.table_id) {
 				inlined_table_name = GetInlinedTableName(inlined_table, commit_snapshot);
-				pre_created_inlined_tables_with_data.insert(entry.table_id.index);
 			}
 		}
 		if (inlined_table_name.empty()) {

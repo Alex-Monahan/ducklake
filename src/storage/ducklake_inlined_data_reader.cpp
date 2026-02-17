@@ -211,8 +211,8 @@ AsyncResult DuckLakeInlinedDataReader::Scan(ClientContext &context, GlobalTableF
 			switch (virtual_columns[c]) {
 			case InlinedVirtualColumn::NONE: {
 				auto column_id = source_idx++;
-				if (TryEvaluateExpression(context, c, scan_chunk.data[column_id],
-				                          scan_chunk.data[column_id].GetType(), chunk.data[c])) {
+				if (TryEvaluateExpression(context, c, scan_chunk.data[column_id], scan_chunk.data[column_id].GetType(),
+				                          chunk.data[c])) {
 					break;
 				}
 				if (chunk.data[c].GetType() != scan_chunk.data[column_id].GetType()) {

@@ -15,21 +15,7 @@ class BaseStatistics;
 
 //! Returns true for types that require value-based (not lexicographic string) comparison for min/max stats
 inline bool RequiresValueComparison(const LogicalType &type) {
-	if (type.IsNumeric()) {
-		return true;
-	}
-	switch (type.id()) {
-	case LogicalTypeId::DATE:
-	case LogicalTypeId::TIME:
-	case LogicalTypeId::TIMESTAMP:
-	case LogicalTypeId::TIMESTAMP_TZ:
-	case LogicalTypeId::TIMESTAMP_SEC:
-	case LogicalTypeId::TIMESTAMP_MS:
-	case LogicalTypeId::TIMESTAMP_NS:
-		return true;
-	default:
-		return false;
-	}
+	return type.IsNumeric() || type.IsTemporal();
 }
 
 struct DuckLakeColumnStats;

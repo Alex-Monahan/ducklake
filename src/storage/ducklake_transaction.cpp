@@ -3,6 +3,7 @@
 #include "common/ducklake_types.hpp"
 #include "common/ducklake_util.hpp"
 #include "duckdb/common/thread.hpp"
+#include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/catalog/catalog_entry/scalar_macro_catalog_entry.hpp"
 #include "duckdb/common/types/uuid.hpp"
 #include "duckdb/function/scalar_macro_function.hpp"
@@ -2085,6 +2086,31 @@ void DuckLakeTransaction::AppendInlinedData(TableIndex table_id, unique_ptr<Duck
 	if (table_changes.new_inlined_data) {
 		// already exists - append
 		auto &existing_data = *table_changes.new_inlined_data;
+		auto &existing_types = existing_data.data->Types();
+		auto &new_types = new_data->data->Types();
+		// check if types changed (e.g. due to ALTER COLUMN TYPE)
+		if (existing_types != new_types) {
+			// if types differ we gotta add a cast.
+			auto context_ref = context.lock();
+			auto casted_data = make_uniq<ColumnDataCollection>(*context_ref, new_types);
+			ColumnDataAppendState append_state;
+			casted_data->InitializeAppend(append_state);
+			for (auto &chunk : existing_data.data->Chunks()) {
+				DataChunk casted_chunk;
+				casted_chunk.Initialize(*context_ref, new_types);
+				for (idx_t col_idx = 0; col_idx < chunk.ColumnCount(); col_idx++) {
+					if (existing_types[col_idx] != new_types[col_idx]) {
+						VectorOperations::Cast(*context_ref, chunk.data[col_idx], casted_chunk.data[col_idx],
+						                       chunk.size());
+					} else {
+						casted_chunk.data[col_idx].Reference(chunk.data[col_idx]);
+					}
+				}
+				casted_chunk.SetCardinality(chunk.size());
+				casted_data->Append(append_state, casted_chunk);
+			}
+			existing_data.data = std::move(casted_data);
+		}
 		ColumnDataAppendState append_state;
 		existing_data.data->InitializeAppend(append_state);
 		for (auto &chunk : new_data->data->Chunks()) {
@@ -2125,6 +2151,7 @@ void DuckLakeTransaction::AddNewInlinedDeletes(TableIndex table_id, const string
 }
 
 void DuckLakeTransaction::DeleteFromLocalInlinedData(TableIndex table_id, set<idx_t> new_deletes) {
+	lock_guard<mutex> guard(table_data_changes_lock);
 	auto entry = table_data_changes.find(table_id);
 	if (entry == table_data_changes.end()) {
 		throw InternalException("DeleteFromLocalInlinedData called but no transaction-local data exists for table");
@@ -2165,6 +2192,7 @@ void DuckLakeTransaction::DeleteFromLocalInlinedData(TableIndex table_id, set<id
 
 void DuckLakeTransaction::AddColumnToLocalInlinedData(TableIndex table_id, const LogicalType &new_column_type,
                                                       FieldIndex new_field_index, const Value &default_value) {
+	lock_guard<mutex> guard(table_data_changes_lock);
 	auto entry = table_data_changes.find(table_id);
 	if (entry == table_data_changes.end()) {
 		throw InternalException("AddColumnToLocalInlinedData called but no transaction-local data exists");
@@ -2238,6 +2266,7 @@ static void RemoveFieldStats(map<FieldIndex, DuckLakeColumnStats> &column_stats,
 
 void DuckLakeTransaction::RemoveColumnFromLocalInlinedData(TableIndex table_id, LogicalIndex removed_column_index,
                                                            const DuckLakeFieldId &field_id) {
+	lock_guard<mutex> guard(table_data_changes_lock);
 	auto entry = table_data_changes.find(table_id);
 	if (entry == table_data_changes.end()) {
 		throw InternalException("RemoveColumnFromLocalInlinedData called but no transaction-local data exists");

@@ -1,6 +1,5 @@
 #include "common/ducklake_util.hpp"
 #include "duckdb/common/string_util.hpp"
-#include <cmath>
 #include "duckdb/parser/keyword_helper.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "storage/ducklake_metadata_manager.hpp"
@@ -9,6 +8,8 @@
 #include "duckdb/planner/filter/dynamic_filter.hpp"
 #include "duckdb/function/scalar/variant_utils.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+
+#include <cmath>
 
 namespace duckdb {
 
@@ -142,7 +143,6 @@ string ToSQLString(DuckLakeMetadataManager &metadata_manager, const Value &value
 	case LogicalTypeId::TIMESTAMP_MS:
 	case LogicalTypeId::TIMESTAMP_NS:
 	case LogicalTypeId::BLOB:
-		return "'" + value.ToString() + "'::" + value_type;
 	case LogicalTypeId::GEOMETRY:
 		return "'" + value.ToString() + "'::" + value_type;
 	case LogicalTypeId::INTERVAL: {
@@ -208,8 +208,8 @@ string ToSQLString(DuckLakeMetadataManager &metadata_manager, const Value &value
 			// Stored as VARCHAR text - use ToString() which produces parseable format
 			return value.ToString();
 		}
-		auto &children = value.type().id() == LogicalTypeId::LIST ? ListValue::GetChildren(value)
-		                                                          : ArrayValue::GetChildren(value);
+		auto &children =
+		    value.type().id() == LogicalTypeId::LIST ? ListValue::GetChildren(value) : ArrayValue::GetChildren(value);
 		string ret = "[";
 		for (idx_t i = 0; i < children.size(); i++) {
 			ret += ToSQLString(metadata_manager, children[i]);
@@ -327,7 +327,8 @@ DynamicFilter *DuckLakeUtil::GetOptionalDynamicFilter(const TableFilter &filter)
 }
 
 bool DuckLakeUtil::IsInlinedSystemColumn(const string &name) {
-	return name == "row_id" || name == "begin_snapshot" || name == "end_snapshot";
+	return StringUtil::CIEquals(name, "row_id") || StringUtil::CIEquals(name, "begin_snapshot") ||
+	       StringUtil::CIEquals(name, "end_snapshot");
 }
 
 bool DuckLakeUtil::HasInlinedSystemColumnConflict(const ColumnList &columns) {

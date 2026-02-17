@@ -72,7 +72,7 @@ static InsertionOrderPreservingMap<string> DuckLakeDynamicToString(TableFunction
 
 	// Build filename list showing only actual data files (not inlined data tables)
 	constexpr size_t FILE_NAME_LIST_LIMIT = 5;
-	vector<std::string> file_path_names;
+	vector<string> file_path_names;
 	for (idx_t i = 0; i < files.size() && file_path_names.size() <= FILE_NAME_LIST_LIMIT; i++) {
 		if (files[i].data_type == DuckLakeDataType::DATA_FILE) {
 			file_path_names.push_back(files[i].file.path);
