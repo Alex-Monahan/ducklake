@@ -14,7 +14,7 @@ namespace duckdb {
 class BaseStatistics;
 
 //! Returns true for types that require value-based (not lexicographic string) comparison for min/max stats
-static bool RequiresValueComparison(const LogicalType &type) {
+inline bool RequiresValueComparison(const LogicalType &type) {
 	if (type.IsNumeric()) {
 		return true;
 	}
