@@ -11,7 +11,7 @@ test-env DUCKLAKE_CONNECTION __TEST_DIR__/{UUID}.db
 test-env DATA_PATH __TEST_DIR__
 
 statement ok
-ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/merge_adjacent_max_files/')
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/merge_adjacent_max_files/', DATA_INLINING_ROW_LIMIT 0)
 
 statement ok
 USE ducklake;
@@ -25,9 +25,6 @@ loop i 0 20
 statement ok
 INSERT INTO example VALUES (${i});
 
-statement ok
-CALL ducklake_flush_inlined_data('ducklake')
-
 endloop
 
 query III
@@ -36,10 +33,10 @@ SELECT table_name, files_processed, files_created FROM ducklake_merge_adjacent_f
 example	20	1
 
 # We create max one file, since we use the default size limits, one file should fit all
-query I
-SELECT max(data_file_id) = min(data_file_id) FROM __ducklake_metadata_ducklake.ducklake_data_file
+query II
+SELECT max(data_file_id), min (data_file_id) FROM __ducklake_metadata_ducklake.ducklake_data_file
 ----
-true
+20	20
 
 statement ok
 DROP TABLE example;
@@ -58,9 +55,6 @@ loop i 0 20
 
 statement ok
 INSERT INTO example VALUES (${i});
-
-statement ok
-CALL ducklake_flush_inlined_data('ducklake')
 
 endloop
 
@@ -89,45 +83,66 @@ SELECT count(*) FROM __ducklake_metadata_ducklake.ducklake_data_file
 ----
 20
 
-query I
-SELECT count(*) FROM __ducklake_metadata_ducklake.ducklake_data_file
-----
-20
-
 query II
-SELECT table_name, files_created FROM ducklake_merge_adjacent_files('ducklake', 'example', max_compacted_files=>2) ORDER BY ALL
+SELECT max(data_file_id), min (data_file_id) FROM __ducklake_metadata_ducklake.ducklake_data_file
 ----
-example	1
-example	1
+40	21
+
+query III
+SELECT table_name, files_processed, files_created FROM ducklake_merge_adjacent_files('ducklake', 'example', max_compacted_files=>2) ORDER BY ALL
+----
+example	5	1
+example	5	1
 
 # We create two new files, and remove as many as necessary to create them
-query I
-SELECT count(*) < 20 FROM __ducklake_metadata_ducklake.ducklake_data_file
-----
-true
-
 query II
-SELECT table_name, files_created FROM ducklake_merge_adjacent_files('ducklake', 'example', max_compacted_files=>1)
+SELECT max(data_file_id), min (data_file_id) > 30 FROM __ducklake_metadata_ducklake.ducklake_data_file
 ----
-example	1
+42	True
 
-# We create max one file - active file count decreased
-query I
-SELECT count(*) < 20 FROM __ducklake_metadata_ducklake.ducklake_data_file WHERE end_snapshot IS NULL
+query III
+SELECT table_name, files_processed, files_created FROM ducklake_merge_adjacent_files('ducklake', 'example', max_compacted_files=>1)
 ----
-true
+example	3	1
 
-statement ok
+# We create max one file
+query II
+SELECT max(data_file_id), min (data_file_id) > 31 FROM __ducklake_metadata_ducklake.ducklake_data_file
+----
+43	True
+
+query III
 SELECT table_name, files_processed, files_created FROM ducklake_merge_adjacent_files('ducklake', 'example', max_compacted_files=>1000) ORDER BY ALL
+----
+example	4	1
+example	5	1
 
 # We basically do max compaction, limiting the size set
+query II
+SELECT max(data_file_id) > 43, min (data_file_id) > 32 FROM __ducklake_metadata_ducklake.ducklake_data_file
+----
+True	True
 
-# Keep merging until fully compacted
-statement ok
+query III
 SELECT table_name, files_processed, files_created FROM ducklake_merge_adjacent_files('ducklake', 'example', max_compacted_files=>1000)
+----
+example	3	1
 
-statement ok
+# Calling it again, merges one more time both snapshots as they are under the size limit
+query I
+SELECT max(data_file_id) FROM __ducklake_metadata_ducklake.ducklake_data_file
+----
+46
+
+query III
 SELECT table_name, files_processed, files_created FROM ducklake_merge_adjacent_files('ducklake', 'example', max_compacted_files=>1000)
+----
+
+# Calling it again, produces no changes
+query I
+SELECT max(data_file_id) BETWEEN 46 AND 48 FROM __ducklake_metadata_ducklake.ducklake_data_file
+----
+True
 
 # Check data is still correct
 query I
@@ -160,9 +175,6 @@ INSERT INTO table1 VALUES (${i});
 statement ok
 INSERT INTO table2 VALUES (${i});
 
-statement ok
-CALL ducklake_flush_inlined_data('ducklake')
-
 endloop
 
 query I
@@ -172,17 +184,17 @@ SELECT count(*) FROM __ducklake_metadata_ducklake.ducklake_data_file
 
 # Compact entire database with max_compacted_files=1 per table
 # Each table should get at most 1 compaction operation
-query II
-SELECT table_name, files_created FROM ducklake_merge_adjacent_files('ducklake', max_compacted_files=>1) ORDER BY table_name
+query III
+SELECT table_name, files_processed, files_created FROM ducklake_merge_adjacent_files('ducklake', max_compacted_files=>1) ORDER BY table_name
 ----
-table1	1
-table2	1
+table1	5	1
+table2	5	1
 
 # Both tables got compacted (1 operation each)
 query I
-SELECT count(*) < 20 FROM __ducklake_metadata_ducklake.ducklake_data_file
+SELECT count(*) FROM __ducklake_metadata_ducklake.ducklake_data_file
 ----
-true
+12
 
 # Check data is still correct
 query I

@@ -24,12 +24,18 @@ CALL ducklake_set_option('ducklake', 'target_file_size', '10KB');
 statement ok
 CREATE TABLE t (id INTEGER, data VARCHAR);
 
+statement ok
+SET VARIABLE snap_create = (SELECT MAX(snapshot_id) FROM ducklake_snapshots('ducklake'));
+
 # Create a LARGE file A that won't be merged (exceeds target_file_size)
 statement ok
 INSERT INTO t SELECT i, repeat('x', 100) FROM range(5000) t(i);
 
 statement ok
 CALL ducklake_flush_inlined_data('ducklake')
+
+statement ok
+SET VARIABLE snap_A = (SELECT MAX(snapshot_id) FROM ducklake_snapshots('ducklake'));
 
 # Create small files B and C that WILL be merged
 statement ok
@@ -39,10 +45,16 @@ statement ok
 CALL ducklake_flush_inlined_data('ducklake')
 
 statement ok
+SET VARIABLE snap_B = (SELECT MAX(snapshot_id) FROM ducklake_snapshots('ducklake'));
+
+statement ok
 INSERT INTO t SELECT i + 5100, 'small2' FROM range(100) t(i);
 
 statement ok
 CALL ducklake_flush_inlined_data('ducklake')
+
+statement ok
+SET VARIABLE snap_C = (SELECT MAX(snapshot_id) FROM ducklake_snapshots('ducklake'));
 
 # At this point we have 3 files
 query I
@@ -60,6 +72,9 @@ query III
 SELECT table_name, files_processed, files_created FROM ducklake_merge_adjacent_files('ducklake', 't')
 ----
 t	2	1
+
+statement ok
+SET VARIABLE snap_merge_BC = (SELECT MAX(snapshot_id) FROM ducklake_snapshots('ducklake'));
 
 # State now:
 # - File A (ids 0-4999): NO partial_max
@@ -84,10 +99,16 @@ statement ok
 CALL ducklake_flush_inlined_data('ducklake')
 
 statement ok
+SET VARIABLE snap_D = (SELECT MAX(snapshot_id) FROM ducklake_snapshots('ducklake'));
+
+statement ok
 INSERT INTO t SELECT i + 5210, 'small4' FROM range(10) t(i);
 
 statement ok
 CALL ducklake_flush_inlined_data('ducklake')
+
+statement ok
+SET VARIABLE snap_E = (SELECT MAX(snapshot_id) FROM ducklake_snapshots('ducklake'));
 
 # Set small target file size so only D & E get merged
 statement ok
@@ -105,6 +126,9 @@ query III
 SELECT table_name, files_processed, files_created FROM ducklake_merge_adjacent_files('ducklake', 't')
 ----
 t	2	1
+
+statement ok
+SET VARIABLE snap_merge_DE = (SELECT MAX(snapshot_id) FROM ducklake_snapshots('ducklake'));
 
 # State now:
 # - File A: NO partial_max
@@ -134,12 +158,18 @@ DELETE FROM t WHERE id < 4900;
 statement ok
 CALL ducklake_flush_inlined_data('ducklake')
 
+statement ok
+SET VARIABLE snap_del_A = (SELECT MAX(snapshot_id) FROM ducklake_snapshots('ducklake'));
+
 # Delete from merged file BC (has partial_max)
 statement ok
 DELETE FROM t WHERE id >= 5000 AND id < 5150;
 
 statement ok
 CALL ducklake_flush_inlined_data('ducklake')
+
+statement ok
+SET VARIABLE snap_del_BC = (SELECT MAX(snapshot_id) FROM ducklake_snapshots('ducklake'));
 
 # Set large target to merge all files
 statement ok
@@ -150,6 +180,9 @@ query III
 SELECT table_name, files_processed, files_created FROM ducklake_rewrite_data_files('ducklake', 't', delete_threshold => 0)
 ----
 t	2	1
+
+statement ok
+SET VARIABLE snap_rewrite = (SELECT MAX(snapshot_id) FROM ducklake_snapshots('ducklake'));
 
 # Merge all of them into a single file
 query III
@@ -166,5 +199,61 @@ SELECT COUNT(*) FROM ducklake_list_files('ducklake', 't');
 # Ensure the final count is correct after all operations
 query I
 SELECT COUNT(*) FROM t;
+----
+170
+
+# Ensure time-travel works across all snapshots
+query I
+SELECT COUNT(*) FROM t AT (VERSION => getvariable('snap_create'))
+----
+0
+
+query I
+SELECT COUNT(*) FROM t AT (VERSION => getvariable('snap_A'))
+----
+5000
+
+query I
+SELECT COUNT(*) FROM t AT (VERSION => getvariable('snap_B'))
+----
+5100
+
+query I
+SELECT COUNT(*) FROM t AT (VERSION => getvariable('snap_C'))
+----
+5200
+
+query I
+SELECT COUNT(*) FROM t AT (VERSION => getvariable('snap_merge_BC'))
+----
+5200
+
+query I
+SELECT COUNT(*) FROM t AT (VERSION => getvariable('snap_D'))
+----
+5210
+
+query I
+SELECT COUNT(*) FROM t AT (VERSION => getvariable('snap_E'))
+----
+5220
+
+query I
+SELECT COUNT(*) FROM t AT (VERSION => getvariable('snap_merge_DE'))
+----
+5220
+
+query I
+SELECT COUNT(*) FROM t AT (VERSION => getvariable('snap_del_A'))
+----
+320
+
+query I
+SELECT COUNT(*) FROM t AT (VERSION => getvariable('snap_del_BC'))
+----
+170
+
+query I
+SELECT COUNT(*) FROM t AT (VERSION => getvariable('snap_rewrite'))
 ----
 170

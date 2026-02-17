@@ -11,7 +11,6 @@ test-env DUCKLAKE_CONNECTION __TEST_DIR__/{UUID}.db
 test-env DATA_PATH __TEST_DIR__
 
 
-# Disable inlining, this test needs physical files to verify transaction conflict cleanup
 statement ok
 ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/ducklake_files_conflict_cleanup', DATA_INLINING_ROW_LIMIT 0)
 
@@ -33,9 +32,6 @@ CREATE TABLE ducklake.test(s VARCHAR);
 
 statement ok con2
 INSERT INTO ducklake.test VALUES ('hello'), ('world');
-
-statement ok con2
-CALL ducklake_flush_inlined_data('ducklake')
 
 statement ok con1
 COMMIT
