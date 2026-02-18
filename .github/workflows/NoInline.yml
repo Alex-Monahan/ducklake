@@ -1,4 +1,4 @@
-name: Config Tests
+name: No Inline Tests
 on: [push, pull_request,repository_dispatch]
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref || '' }}-${{ github.base_ref || '' }}-${{ github.ref != 'refs/heads/main' || github.sha }}
@@ -8,8 +8,8 @@ defaults:
     shell: bash
 
 jobs:
-  ducklake-config-tests:
-    name: DuckDB Tests with DuckLake + DuckDB Back-End
+  ducklake-no-inline-tests:
+    name: DuckLake Tests (No Inlining)
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -57,6 +57,6 @@ jobs:
       run: |
         make release
 
-    - name: Test extension
+    - name: Test extension (no inlining)
       run: |
-        build/release/test/unittest --test-config test/configs/attach_ducklake.json --test-dir duckdb
+        build/release/test/unittest --test-config test/configs/no_inline.json
