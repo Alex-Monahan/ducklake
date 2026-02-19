@@ -3,6 +3,7 @@
 #include "common/ducklake_util.hpp"
 #include "duckdb/planner/tableref/bound_at_clause.hpp"
 #include "duckdb/common/types/blob.hpp"
+#include "duckdb/common/type_visitor.hpp"
 #include "storage/ducklake_catalog.hpp"
 #include "common/ducklake_types.hpp"
 #include "storage/ducklake_schema_entry.hpp"
@@ -73,6 +74,15 @@ bool DuckLakeMetadataManager::TypeIsNativelySupported(const LogicalType &type) {
 bool DuckLakeMetadataManager::SupportsInlining(const LogicalType &type) {
 	if (type.id() == LogicalTypeId::GEOMETRY) {
 		return false;
+	}
+	return true;
+}
+
+bool DuckLakeMetadataManager::SupportsInliningTypes(const vector<LogicalType> &types) {
+	for (auto &type : types) {
+		if (TypeVisitor::Contains(type, [&](const LogicalType &t) { return !SupportsInlining(t); })) {
+			return false;
+		}
 	}
 	return true;
 }

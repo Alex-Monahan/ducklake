@@ -1,5 +1,4 @@
 #include "common/ducklake_types.hpp"
-#include "storage/ducklake_metadata_manager.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/to_string.hpp"
 #include "duckdb/common/array.hpp"
@@ -165,15 +164,6 @@ void DuckLakeTypes::CheckSupportedType(const LogicalType &type) {
 	    (type.id() != LogicalTypeId::GEOMETRY && TypeVisitor::Contains(type, LogicalTypeId::GEOMETRY))) {
 		throw InvalidInputException("GEOMETRY type is only supported as a top-level type");
 	}
-}
-
-bool DuckLakeTypes::SupportsInlining(const vector<LogicalType> &types, DuckLakeMetadataManager &metadata_manager) {
-	for (auto &type : types) {
-		if (TypeVisitor::Contains(type, [&](const LogicalType &t) { return !metadata_manager.SupportsInlining(t); })) {
-			return false;
-		}
-	}
-	return true;
 }
 
 } // namespace duckdb
