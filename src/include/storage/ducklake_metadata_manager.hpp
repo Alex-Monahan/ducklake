@@ -229,6 +229,25 @@ public:
 	virtual void MigrateV03(bool allow_failures = false);
 	virtual void ExecuteMigration(string migrate_query, bool allow_failures);
 
+	//! Install any backend-specific stored procedures (called after InitializeDuckLake)
+	virtual void InstallStoredProcedures();
+	//! Whether this metadata manager supports the stored procedure commit path
+	virtual bool SupportsStoredProcCommit() const;
+	//! Enable/disable offset mode for SQL generation (used by stored proc commit path)
+	virtual void SetOffsetMode(bool enable);
+	//! Whether offset mode is currently enabled
+	virtual bool IsOffsetMode() const;
+	//! Format a file ID for use in SQL - in offset mode returns an expression relative to FILE_ID_BASE
+	virtual string FormatFileId(idx_t id) const;
+	//! Format a catalog ID for use in SQL - in offset mode returns an expression relative to CATALOG_ID_BASE
+	virtual string FormatCatalogId(idx_t id) const;
+	//! Format a schema version for use in SQL - in offset mode returns {SCHEMA_VERSION} placeholder
+	virtual string FormatSchemaVersion(idx_t schema_version) const;
+
+	//! Sentinel value used as the starting point for offset-based IDs in stored proc commit path.
+	//! IDs >= this value are treated as offset-relative (new); IDs below are absolute (existing).
+	static constexpr idx_t OFFSET_ID_SENTINEL = 1000000000ULL;
+
 	string LoadPath(string path);
 	string StorePath(string path);
 

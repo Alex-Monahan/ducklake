@@ -388,8 +388,8 @@ void AddChangeInfo(DuckLakeCommitState &commit_state, SnapshotChangeInfo &change
 	}
 }
 
-string DuckLakeTransaction::WriteSnapshotChanges(DuckLakeCommitState &commit_state,
-                                                 TransactionChangeInformation &changes) {
+SnapshotChangeInfo DuckLakeTransaction::BuildSnapshotChangeInfo(DuckLakeCommitState &commit_state,
+                                                               TransactionChangeInformation &changes) {
 	SnapshotChangeInfo change_info;
 
 	// re-add all inserted tables - transaction-local table identifiers should have been converted at this stage
@@ -481,6 +481,12 @@ string DuckLakeTransaction::WriteSnapshotChanges(DuckLakeCommitState &commit_sta
 	}
 	AddChangeInfo(commit_state, change_info, changes.tables_merge_adjacent, "merge_adjacent");
 	AddChangeInfo(commit_state, change_info, changes.tables_rewrite_delete, "rewrite_delete");
+	return change_info;
+}
+
+string DuckLakeTransaction::WriteSnapshotChanges(DuckLakeCommitState &commit_state,
+                                                 TransactionChangeInformation &changes) {
+	auto change_info = BuildSnapshotChangeInfo(commit_state, changes);
 	return metadata_manager->WriteSnapshotChanges(change_info, commit_info);
 }
 
@@ -1046,7 +1052,7 @@ void DuckLakeTransaction::GetNewTableInfo(DuckLakeCommitState &commit_state, Duc
 		auto &table = tables.front().get();
 
 		DuckLakeTableInfo table_entry;
-		table_entry.id = table.GetTableId();
+		table_entry.id = commit_state.GetTableId(table);
 		table_entry.uuid = table.GetTableUUID();
 		table_entry.columns = table.GetTableColumns();
 		result.new_inlined_data_tables.push_back(std::move(table_entry));
@@ -1600,7 +1606,22 @@ string DuckLakeTransaction::CommitChanges(DuckLakeCommitState &commit_state,
 		batch_queries += metadata_manager->WriteNewColumnTags(result.new_column_tags);
 		batch_queries += metadata_manager->WriteDroppedColumns(result.dropped_columns);
 		batch_queries += metadata_manager->WriteNewColumns(result.new_columns);
-		batch_queries += metadata_manager->WriteNewInlinedTables(commit_snapshot, result.new_inlined_data_tables);
+		// Filter out inlined data tables that are already handled by WriteNewTables
+		// (WriteNewTables internally calls WriteNewInlinedTables for newly created tables)
+		vector<DuckLakeTableInfo> extra_inlined_tables;
+		for (auto &inlined_table : result.new_inlined_data_tables) {
+			bool already_new = false;
+			for (auto &new_table : result.new_tables) {
+				if (new_table.id == inlined_table.id) {
+					already_new = true;
+					break;
+				}
+			}
+			if (!already_new) {
+				extra_inlined_tables.push_back(inlined_table);
+			}
+		}
+		batch_queries += metadata_manager->WriteNewInlinedTables(commit_snapshot, extra_inlined_tables);
 		batch_queries += metadata_manager->WriteNewSortKeys(commit_snapshot, result.new_sort_keys);
 		new_tables_result = result.new_tables;
 		new_inlined_data_tables_result = result.new_inlined_data_tables;
@@ -1769,11 +1790,131 @@ bool RetryOnError(const string &original_message) {
 	return false;
 }
 
+void DuckLakeTransaction::FlushChangesViaStoredProc() {
+	idx_t max_retry_count = 10;
+	idx_t retry_wait_ms = 100;
+	double retry_backoff = 1.5;
+	Value setting_val;
+	auto context_ref = context.lock();
+	if (context_ref->TryGetCurrentSetting("ducklake_max_retry_count", setting_val)) {
+		max_retry_count = setting_val.GetValue<idx_t>();
+	}
+	if (context_ref->TryGetCurrentSetting("ducklake_retry_wait_ms", setting_val)) {
+		retry_wait_ms = setting_val.GetValue<idx_t>();
+	}
+	if (context_ref->TryGetCurrentSetting("ducklake_retry_backoff", setting_val)) {
+		retry_backoff = setting_val.GetValue<double>();
+	}
+
+	auto transaction_snapshot = GetSnapshot();
+	auto transaction_changes = GetTransactionChanges();
+
+	// Enable offset mode - IDs will be relative to FILE_ID_BASE / CATALOG_ID_BASE
+	metadata_manager->SetOffsetMode(true);
+
+	// Build batch SQL with offset expressions. Counters start at OFFSET_ID_SENTINEL so that
+	// newly allocated IDs (>= sentinel) are distinguishable from existing absolute IDs (< sentinel).
+	// FormatCatalogId/FormatFileId will only produce offset expressions for IDs >= sentinel.
+	auto sentinel = DuckLakeMetadataManager::OFFSET_ID_SENTINEL;
+	DuckLakeSnapshot offset_snapshot(0, 0, sentinel, sentinel);
+	DuckLakeCommitState commit_state(offset_snapshot);
+	string batch_queries = CommitChanges(commit_state, transaction_changes, nullptr);
+
+	// Build the changes_made string and snapshot changes SQL
+	auto change_info = BuildSnapshotChangeInfo(commit_state, transaction_changes);
+	string changes_sql = metadata_manager->WriteSnapshotChanges(change_info, commit_info);
+
+	// Compute the total file and catalog IDs consumed (offset from sentinel)
+	auto file_id_count = offset_snapshot.next_file_id - sentinel;
+	auto catalog_id_count = offset_snapshot.next_catalog_id - sentinel;
+
+	// Disable offset mode
+	metadata_manager->SetOffsetMode(false);
+
+	// Call the stored procedure (1 round trip for commit logic)
+	// The batch_queries still have {METADATA_CATALOG} etc. placeholders that need resolving
+	// These are resolved by the postgres_execute/postgres_query path
+	// But for the stored proc, we need the SQL with schema already resolved since it runs inside Postgres
+	// The stored proc receives the SQL with {FILE_ID_BASE}, {CATALOG_ID_BASE}, {SNAPSHOT_ID}, {SCHEMA_VERSION}
+	// placeholders, but {METADATA_CATALOG} needs to be resolved before sending
+
+	// Build the stored proc call - pass all SQL and metadata through postgres_query
+	auto &ducklake_catalog = GetCatalog();
+	auto schema_identifier = DuckLakeUtil::SQLIdentifierToString(ducklake_catalog.MetadataSchemaName());
+	auto schema_identifier_escaped = StringUtil::Replace(schema_identifier, "'", "''");
+
+	// Resolve {METADATA_CATALOG} in the batch SQL (but NOT the snapshot placeholders -
+	// those are resolved by the stored procedure at commit time)
+	auto resolved_batch = StringUtil::Replace(batch_queries, "{METADATA_CATALOG}", schema_identifier_escaped);
+	auto resolved_changes = StringUtil::Replace(changes_sql, "{METADATA_CATALOG}", schema_identifier_escaped);
+
+	// Escape single quotes in the SQL for embedding in a Postgres function call
+	auto escaped_batch = StringUtil::Replace(resolved_batch, "'", "''");
+	auto escaped_changes = StringUtil::Replace(resolved_changes, "'", "''");
+	auto escaped_changes_made = StringUtil::Replace(change_info.changes_made, "'", "''");
+
+	string proc_call = StringUtil::Format(
+	    "SELECT * FROM %s.ducklake_commit('%s', NULL, '%s', '%s', %d, %s, %d, %d, %d, %f, %f)",
+	    schema_identifier_escaped, escaped_batch, escaped_changes, escaped_changes_made,
+	    transaction_snapshot.snapshot_id, SchemaChangesMade() ? "true" : "false",
+	    file_id_count, catalog_id_count, max_retry_count, (double)retry_wait_ms, retry_backoff);
+
+	// Execute via postgres_query to get results back
+	auto &conn = GetConnection();
+	auto catalog_literal = DuckLakeUtil::SQLLiteralToString(ducklake_catalog.MetadataDatabaseName());
+	auto result = conn.Query(StringUtil::Format("SELECT * FROM postgres_query(%s, %s)",
+	                                            catalog_literal, SQLString(proc_call)));
+	if (result->HasError()) {
+		CleanupFiles();
+		result->GetErrorObject().Throw("Failed to commit DuckLake transaction via stored procedure: ");
+	}
+
+	// Extract committed snapshot info from result
+	idx_t committed_snapshot_id = 0;
+	idx_t committed_schema_version = 0;
+	for (auto &row : *result) {
+		committed_snapshot_id = row.GetValue<idx_t>(0);
+		committed_schema_version = row.GetValue<idx_t>(1);
+		break;
+	}
+
+	connection->Commit();
+	catalog_version = committed_schema_version;
+	ducklake_catalog.SetCommittedSnapshotId(committed_snapshot_id);
+}
+
 void DuckLakeTransaction::FlushChanges() {
 	if (!ChangesMade()) {
 		// read-only transactions don't need to do anything
 		return;
 	}
+
+	// Use stored procedure path for Postgres backend
+	if (metadata_manager->SupportsStoredProcCommit()) {
+		try {
+			FlushChangesViaStoredProc();
+			return;
+		} catch (std::exception &ex) {
+			// If the stored proc path fails (e.g., function doesn't exist),
+			// fall back to the multi-round-trip path
+			ErrorData error(ex);
+			if (StringUtil::Contains(error.Message(), "ducklake_commit") &&
+			    (StringUtil::Contains(error.Message(), "does not exist") ||
+			     StringUtil::Contains(error.Message(), "not found"))) {
+				// Stored procedure not installed - fall back
+				auto has_active_transaction = connection->context->transaction.HasActiveTransaction();
+				if (has_active_transaction) {
+					connection->Rollback();
+				}
+				connection->BeginTransaction();
+				snapshot.reset();
+				// Fall through to legacy path below
+			} else {
+				throw;
+			}
+		}
+	}
+
 	idx_t max_retry_count = 10;
 	idx_t retry_wait_ms = 100;
 	double retry_backoff = 1.5;

@@ -37,6 +37,7 @@ struct NewNameMapInfo;
 struct CompactionInformation;
 struct DuckLakePath;
 struct DuckLakeCommitState;
+struct SnapshotChangeInfo;
 
 struct LocalTableDataChanges {
 	vector<DuckLakeDataFile> new_data_files;
@@ -185,6 +186,7 @@ protected:
 private:
 	void CleanupFiles();
 	void FlushChanges();
+	void FlushChangesViaStoredProc();
 	void FlushSettingChanges();
 	string CommitChanges(DuckLakeCommitState &commit_state, TransactionChangeInformation &transaction_changes,
 	                     optional_ptr<vector<DuckLakeGlobalStatsInfo>> stats);
@@ -211,6 +213,7 @@ private:
 	                                   const TransactionChangeInformation &changes);
 	void CheckForConflicts(const TransactionChangeInformation &changes, const SnapshotChangeInformation &other_changes,
 	                       DuckLakeSnapshot transaction_snapshot);
+	SnapshotChangeInfo BuildSnapshotChangeInfo(DuckLakeCommitState &commit_state, TransactionChangeInformation &changes);
 	string WriteSnapshotChanges(DuckLakeCommitState &commit_state, TransactionChangeInformation &changes);
 	//! Return the set of changes made by this transaction
 	TransactionChangeInformation GetTransactionChanges();
