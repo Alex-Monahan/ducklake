@@ -169,7 +169,7 @@ void DuckLakeTypes::CheckSupportedType(const LogicalType &type) {
 
 bool DuckLakeTypes::SupportsInlining(const vector<LogicalType> &types, DuckLakeMetadataManager &metadata_manager) {
 	for (auto &type : types) {
-		if (!metadata_manager.SupportsInlining(type)) {
+		if (TypeVisitor::Contains(type, [&](const LogicalType &t) { return !metadata_manager.SupportsInlining(t); })) {
 			return false;
 		}
 	}

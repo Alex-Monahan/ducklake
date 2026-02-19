@@ -71,11 +71,23 @@ bool DuckLakeMetadataManager::TypeIsNativelySupported(const LogicalType &type) {
 }
 
 bool DuckLakeMetadataManager::SupportsInlining(const LogicalType &type) {
-	// GEOMETRY columns: never inline (any metadata backend)
 	if (type.id() == LogicalTypeId::GEOMETRY) {
 		return false;
 	}
-	return TypeIsNativelySupported(type);
+	return true;
+}
+
+bool DuckLakeMetadataManager::SupportsInliningColumns(const vector<DuckLakeColumnInfo> &columns) {
+	for (auto &col : columns) {
+		auto col_type = DuckLakeTypes::FromString(col.type);
+		if (!SupportsInlining(col_type)) {
+			return false;
+		}
+		if (!col.children.empty() && !SupportsInliningColumns(col.children)) {
+			return false;
+		}
+	}
+	return true;
 }
 
 FileSystem &DuckLakeMetadataManager::GetFileSystem() {
@@ -2128,15 +2140,7 @@ string DuckLakeMetadataManager::WriteNewInlinedTables(DuckLakeSnapshot commit_sn
 		if (DuckLakeUtil::HasInlinedSystemColumnConflict(table_ptr->columns)) {
 			continue;
 		}
-		bool supports_inlining = true;
-		for (auto &col : table_ptr->columns) {
-			auto col_type = DuckLakeTypes::FromString(col.type);
-			if (!SupportsInlining(col_type)) {
-				supports_inlining = false;
-				break;
-			}
-		}
-		if (!supports_inlining) {
+		if (!SupportsInliningColumns(table_ptr->columns)) {
 			continue;
 		}
 		GetInlinedTableQueries(commit_snapshot, *table_ptr, inlined_tables, inlined_table_queries);
