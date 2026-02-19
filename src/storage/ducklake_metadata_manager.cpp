@@ -70,6 +70,14 @@ bool DuckLakeMetadataManager::TypeIsNativelySupported(const LogicalType &type) {
 	return true;
 }
 
+bool DuckLakeMetadataManager::SupportsInlining(const LogicalType &type) {
+	// GEOMETRY columns: never inline (any metadata backend)
+	if (type.id() == LogicalTypeId::GEOMETRY) {
+		return false;
+	}
+	return TypeIsNativelySupported(type);
+}
+
 FileSystem &DuckLakeMetadataManager::GetFileSystem() {
 	return FileSystem::GetFileSystem(transaction.GetCatalog().GetDatabase());
 }
@@ -2118,6 +2126,17 @@ string DuckLakeMetadataManager::WriteNewInlinedTables(DuckLakeSnapshot commit_sn
 		}
 		// FIXME: we are skipping columns that have conflicting names, we should resolve this
 		if (DuckLakeUtil::HasInlinedSystemColumnConflict(table_ptr->columns)) {
+			continue;
+		}
+		bool supports_inlining = true;
+		for (auto &col : table_ptr->columns) {
+			auto col_type = DuckLakeTypes::FromString(col.type);
+			if (!SupportsInlining(col_type)) {
+				supports_inlining = false;
+				break;
+			}
+		}
+		if (!supports_inlining) {
 			continue;
 		}
 		GetInlinedTableQueries(commit_snapshot, *table_ptr, inlined_tables, inlined_table_queries);

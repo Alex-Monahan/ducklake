@@ -104,6 +104,8 @@ public:
 	static unique_ptr<DuckLakeMetadataManager> Create(DuckLakeTransaction &transaction);
 
 	virtual bool TypeIsNativelySupported(const LogicalType &type);
+	//! Check if a type supports data inlining on this metadata backend
+	virtual bool SupportsInlining(const LogicalType &type);
 
 	virtual string GetColumnTypeInternal(const LogicalType &column_type);
 	virtual string CastColumnToTarget(const string &column, const LogicalType &type);
