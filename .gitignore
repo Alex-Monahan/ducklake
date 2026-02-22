@@ -8,3 +8,7 @@ testext
 test/python/__pycache__/
 .Rhistory
 scripts/data/
+
+# Benchmark artifacts
+__benchmark_*
+benchmark/tpch_results_sf1.json
