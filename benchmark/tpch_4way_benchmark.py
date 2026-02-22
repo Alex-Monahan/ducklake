@@ -8,8 +8,8 @@ Runs 4 configurations:
   3. DuckLake DuckDB,  preserve_insertion_order=true
   4. DuckLake DuckDB,  preserve_insertion_order=false
 
-Each configuration gets its own local data directory and metadata DB.
-Measures insert times and query execution times for all 22 TPC-H queries.
+Uses a single DuckDB process per config+iteration to avoid process startup overhead.
+Measures actual query execution time via DuckDB's .timer, not wall-clock subprocess time.
 
 Usage:
   python3 benchmark/tpch_4way_benchmark.py [--sf 1] [--iterations 3] [--queries 1,3,5,6]
@@ -19,6 +19,7 @@ Usage:
 import subprocess
 import sys
 import os
+import re
 import time
 import json
 import argparse
@@ -52,12 +53,23 @@ CONFIGS = [
     {"name": "duckdb_unordered",  "format": "duckdb",  "preserve_order": False, "label": "DuckDB (unordered)"},
 ]
 
+TIMER_RE = re.compile(r"Run Time \(s\): real ([\d.]+)")
+
 
 def run_sql(sql, timeout=600):
     """Run SQL in DuckDB and return (stdout, stderr, returncode)."""
     proc = subprocess.run(
         [DUCKDB_PATH, "-c", sql],
         capture_output=True, text=True, timeout=timeout,
+    )
+    return proc.stdout, proc.stderr, proc.returncode
+
+
+def run_sql_stdin(sql, timeout=600):
+    """Run SQL via DuckDB stdin (for multi-statement scripts). Returns (stdout, stderr, rc)."""
+    proc = subprocess.run(
+        [DUCKDB_PATH],
+        input=sql, capture_output=True, text=True, timeout=timeout,
     )
     return proc.stdout, proc.stderr, proc.returncode
 
@@ -102,7 +114,6 @@ def ingest_config(sf, config, storage):
     print(f"  Ingesting: {label} ...", flush=True)
 
     order_setting = "true" if ordered else "false"
-
     secret_sql = S3_SECRET_SQL if storage == "s3" else ""
 
     sql = f"""{secret_sql}
@@ -136,22 +147,72 @@ ATTACH 'ducklake:{metadata_db}' AS dl
     return duration
 
 
-def run_query_config(config, query_sql, storage):
-    """Run a TPC-H query for a given configuration."""
+def run_queries_single_process(config, query_nums, queries, storage, timeout=600):
+    """Run multiple TPC-H queries in a single DuckDB process. Returns {qnum: real_time}.
+
+    Uses .timer on with full output (no /dev/null) so timer lines are captured.
+    Pattern after setup: marker(0.001s), query(real_time), marker, query, ...
+    Query timers are at odd positions (1, 3, 5...) after the setup marker.
+    """
     name = config["name"]
     metadata_db = f"__bench_4way_{name}_metadata.db"
-
     secret_sql = S3_SECRET_SQL if storage == "s3" else ""
 
+    # Build SQL: setup without timer, then enable timer for queries
+    # We disable timer during setup to avoid noise from ATTACH/USE
     sql = f"""{secret_sql}
 ATTACH 'ducklake:{metadata_db}' AS dl (READ_ONLY);
 USE dl;
-{query_sql}
+.timer on
+SELECT '---SETUP_DONE---';
 """
-    start = time.time()
-    stdout, stderr, rc = run_sql(sql)
-    duration = time.time() - start
-    return duration, rc, stderr
+
+    for qnum in query_nums:
+        if qnum not in queries:
+            continue
+        # Pattern: marker SELECT, then actual query
+        # Timer lines will be: marker(~0.001s), query(real_time)
+        sql += f"SELECT '---QSTART_{qnum}---';\n"
+        sql += f"{queries[qnum]};\n"
+
+    stdout, stderr, rc = run_sql_stdin(sql, timeout=timeout)
+    if rc != 0:
+        return None, stderr
+
+    # Parse all "Run Time (s): real X.XXX" lines from stdout
+    all_times = TIMER_RE.findall(stdout)
+    all_times = [float(t) for t in all_times]
+
+    # After SETUP_DONE, timer lines alternate: marker_time, query_time, marker_time, query_time...
+    # First timer line is for SETUP_DONE marker itself
+    # Then: QSTART marker (skip), query (capture), QSTART marker (skip), query (capture), ...
+
+    # Find SETUP_DONE in stdout to locate the starting timer index
+    lines = stdout.split("\n")
+    setup_timer_count = 0
+    for line in lines:
+        if "---SETUP_DONE---" in line:
+            break
+        if "Run Time" in line:
+            setup_timer_count += 1
+
+    # Timer line at setup_timer_count is for SETUP_DONE marker
+    # After that: pairs of (marker_timer, query_timer)
+    after_setup = all_times[setup_timer_count + 1:]  # skip SETUP_DONE's timer
+
+    result = {}
+    qi = 0
+    for qnum in query_nums:
+        if qnum not in queries:
+            continue
+        idx = qi * 2 + 1  # odd positions are query timers (0=marker, 1=query, 2=marker, 3=query...)
+        if idx < len(after_setup):
+            result[qnum] = after_setup[idx]
+        else:
+            result[qnum] = None
+        qi += 1
+
+    return result, None
 
 
 def main():
@@ -177,7 +238,7 @@ def main():
     # === Phase 1: Ingest all 4 configurations ===
     print(f"\n{'='*80}")
     print(f"TPC-H SF={sf} - 4-Way Benchmark (Parquet/DuckDB x Ordered/Unordered)")
-    print(f"Storage: {storage}")
+    print(f"Storage: {storage} | Iterations: {iterations}")
     print(f"{'='*80}")
     print(f"\nPhase 1: Data Ingestion", flush=True)
 
@@ -193,7 +254,30 @@ def main():
         print(f"    {config['label']:<25} {tstr}")
 
     # === Phase 2: Query Benchmark ===
-    print(f"\nPhase 2: Query Benchmark ({iterations} iterations each)", flush=True)
+    print(f"\nPhase 2: Query Benchmark ({iterations} iterations each)")
+    print(f"  (Using single-process timing via .timer - measures actual query execution)")
+    sys.stdout.flush()
+
+    # Run all iterations for all configs
+    # all_run_times[config_name][iteration] = {qnum: time}
+    all_run_times = {c["name"]: [] for c in CONFIGS}
+
+    for iteration in range(iterations):
+        print(f"\n  --- Iteration {iteration + 1}/{iterations} ---", flush=True)
+        for config in CONFIGS:
+            qtimes, err = run_queries_single_process(config, query_nums, queries, storage)
+            if qtimes is None:
+                print(f"    {config['label']}: ERROR - {err[:200] if err else 'unknown'}", flush=True)
+                all_run_times[config["name"]].append({})
+            else:
+                all_run_times[config["name"]].append(qtimes)
+                total = sum(t for t in qtimes.values() if t is not None)
+                print(f"    {config['label']:<25} total: {total:.3f}s", flush=True)
+
+    # === Compute averages ===
+    print(f"\n{'='*80}")
+    print(f"RESULTS (average of {iterations} iterations)")
+    print(f"{'='*80}")
 
     # Header
     labels = [c["label"] for c in CONFIGS]
@@ -208,6 +292,7 @@ def main():
             "sf": sf,
             "iterations": iterations,
             "storage": storage,
+            "timing_method": "duckdb_timer_single_process",
             "configurations": [c["label"] for c in CONFIGS],
         },
         "ingest": {c["name"]: ingest_times[c["name"]] for c in CONFIGS},
@@ -222,47 +307,38 @@ def main():
             print(f"Q{qnum:<6} SKIP (not found)")
             continue
 
-        query_sql = queries[qnum]
-        config_times = {}
+        row = f"Q{qnum:<6}"
+        avgs = {}
 
         for config in CONFIGS:
             times = []
-            for i in range(iterations):
-                dur, rc, err = run_query_config(config, query_sql, storage)
-                if rc == 0:
-                    times.append(dur)
-                elif i == 0:
-                    print(f"  [{config['label']} Q{qnum} error: {err[:200]}]", file=sys.stderr)
+            for run in all_run_times[config["name"]]:
+                t = run.get(qnum)
+                if t is not None:
+                    times.append(t)
 
             avg = sum(times) / len(times) if times else None
-            config_times[config["name"]] = {"avg": avg, "times": times}
-
-        # Print row
-        row = f"Q{qnum:<6}"
-        avgs = {}
-        for config in CONFIGS:
-            avg = config_times[config["name"]]["avg"]
             avgs[config["name"]] = avg
+
             if avg is not None:
                 row += f" {avg:>21.3f}s"
                 totals[config["name"]] += avg
             else:
                 row += f" {'FAIL':>22}"
+
+            results.setdefault("queries", {})[qnum] = results.get("queries", {}).get(qnum, {})
+            results["queries"][qnum][config["name"]] = {
+                "avg": avg,
+                "times": times,
+            }
+
         print(row, flush=True)
 
-        # Determine winner for this query
+        # Determine winner
         valid = {k: v for k, v in avgs.items() if v is not None}
         if valid:
             winner = min(valid, key=valid.get)
             wins[winner] += 1
-
-        results["queries"][qnum] = {
-            c["name"]: {
-                "avg": config_times[c["name"]]["avg"],
-                "times": config_times[c["name"]]["times"],
-            }
-            for c in CONFIGS
-        }
 
     # === Summary ===
     print(f"\n{'='*80}")
