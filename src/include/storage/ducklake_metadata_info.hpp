@@ -160,6 +160,8 @@ struct DuckLakeFileInfo {
 	MappingIndex mapping_id;
 	vector<DuckLakeColumnStatsInfo> column_stats;
 	vector<DuckLakeFilePartitionInfo> partition_values;
+	//! The file format (default: "parquet", can also be "duckdb")
+	string file_format = "parquet";
 };
 
 struct DuckLakeInlinedDataInfo {
