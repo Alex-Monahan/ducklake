@@ -8,11 +8,12 @@ Runs 4 configurations:
   3. DuckLake DuckDB,  preserve_insertion_order=true
   4. DuckLake DuckDB,  preserve_insertion_order=false
 
-Each configuration gets its own S3 prefix and metadata DB.
+Each configuration gets its own local data directory and metadata DB.
 Measures insert times and query execution times for all 22 TPC-H queries.
 
 Usage:
   python3 benchmark/tpch_4way_benchmark.py [--sf 1] [--iterations 3] [--queries 1,3,5,6]
+  python3 benchmark/tpch_4way_benchmark.py --storage s3  # use moto S3 instead of local
 """
 
 import subprocess
@@ -21,6 +22,7 @@ import os
 import time
 import json
 import argparse
+import shutil
 
 DUCKDB_PATH = "./build/release/duckdb"
 TPCH_QUERY_DIR = "duckdb/extension/tpch/dbgen/queries"
@@ -71,7 +73,16 @@ def get_tpch_queries():
     return queries
 
 
-def ingest_config(sf, config):
+def get_data_path(config, storage):
+    """Get the data path for a config (local dir or S3 prefix)."""
+    name = config["name"]
+    if storage == "local":
+        return f"__bench_4way_{name}_data/"
+    else:
+        return f"s3://{S3_BUCKET}/bench_4way_{name}/data/"
+
+
+def ingest_config(sf, config, storage):
     """Ingest TPC-H data for a given configuration. Returns duration or None."""
     name = config["name"]
     fmt = config["format"]
@@ -79,19 +90,28 @@ def ingest_config(sf, config):
     label = config["label"]
 
     metadata_db = f"__bench_4way_{name}_metadata.db"
-    s3_prefix = f"bench_4way_{name}/data/"
+    data_path = get_data_path(config, storage)
 
-    print(f"  Ingesting: {label} ...")
+    # Clean up previous run
+    if os.path.exists(metadata_db):
+        os.remove(metadata_db)
+    local_data_dir = f"__bench_4way_{name}_data"
+    if os.path.exists(local_data_dir):
+        shutil.rmtree(local_data_dir)
+
+    print(f"  Ingesting: {label} ...", flush=True)
 
     order_setting = "true" if ordered else "false"
 
-    sql = f"""{S3_SECRET_SQL}
+    secret_sql = S3_SECRET_SQL if storage == "s3" else ""
+
+    sql = f"""{secret_sql}
 SET threads=4;
 SET preserve_insertion_order={order_setting};
 CALL dbgen(sf={sf});
 
 ATTACH 'ducklake:{metadata_db}' AS dl
-    (DATA_PATH 's3://{S3_BUCKET}/{s3_prefix}');
+    (DATA_PATH '{data_path}');
 """
 
     if fmt == "duckdb":
@@ -112,16 +132,18 @@ ATTACH 'ducklake:{metadata_db}' AS dl
     if rc != 0:
         print(f"    ERROR: {stderr[:500]}")
         return None
-    print(f"    Insert time: {duration:.2f}s")
+    print(f"    Insert time: {duration:.2f}s", flush=True)
     return duration
 
 
-def run_query_config(config, query_sql):
+def run_query_config(config, query_sql, storage):
     """Run a TPC-H query for a given configuration."""
     name = config["name"]
     metadata_db = f"__bench_4way_{name}_metadata.db"
 
-    sql = f"""{S3_SECRET_SQL}
+    secret_sql = S3_SECRET_SQL if storage == "s3" else ""
+
+    sql = f"""{secret_sql}
 ATTACH 'ducklake:{metadata_db}' AS dl (READ_ONLY);
 USE dl;
 {query_sql}
@@ -137,10 +159,13 @@ def main():
     parser.add_argument("--sf", type=float, default=1, help="TPC-H scale factor (default: 1)")
     parser.add_argument("--iterations", type=int, default=3, help="Iterations per query (default: 3)")
     parser.add_argument("--queries", default=None, help="Comma-separated query numbers (default: all 22)")
+    parser.add_argument("--storage", choices=["local", "s3"], default="local",
+                        help="Storage backend: 'local' (default) or 's3' (moto)")
     args = parser.parse_args()
 
     sf = args.sf
     iterations = args.iterations
+    storage = args.storage
 
     queries = get_tpch_queries()
     if not queries:
@@ -152,12 +177,13 @@ def main():
     # === Phase 1: Ingest all 4 configurations ===
     print(f"\n{'='*80}")
     print(f"TPC-H SF={sf} - 4-Way Benchmark (Parquet/DuckDB x Ordered/Unordered)")
+    print(f"Storage: {storage}")
     print(f"{'='*80}")
-    print(f"\nPhase 1: Data Ingestion")
+    print(f"\nPhase 1: Data Ingestion", flush=True)
 
     ingest_times = {}
     for config in CONFIGS:
-        duration = ingest_config(sf, config)
+        duration = ingest_config(sf, config, storage)
         ingest_times[config["name"]] = duration
 
     print(f"\n  Ingest Summary:")
@@ -167,7 +193,7 @@ def main():
         print(f"    {config['label']:<25} {tstr}")
 
     # === Phase 2: Query Benchmark ===
-    print(f"\nPhase 2: Query Benchmark ({iterations} iterations each)")
+    print(f"\nPhase 2: Query Benchmark ({iterations} iterations each)", flush=True)
 
     # Header
     labels = [c["label"] for c in CONFIGS]
@@ -181,7 +207,7 @@ def main():
         "config": {
             "sf": sf,
             "iterations": iterations,
-            "s3_endpoint": S3_ENDPOINT,
+            "storage": storage,
             "configurations": [c["label"] for c in CONFIGS],
         },
         "ingest": {c["name"]: ingest_times[c["name"]] for c in CONFIGS},
@@ -202,7 +228,7 @@ def main():
         for config in CONFIGS:
             times = []
             for i in range(iterations):
-                dur, rc, err = run_query_config(config, query_sql)
+                dur, rc, err = run_query_config(config, query_sql, storage)
                 if rc == 0:
                     times.append(dur)
                 elif i == 0:
@@ -222,7 +248,7 @@ def main():
                 totals[config["name"]] += avg
             else:
                 row += f" {'FAIL':>22}"
-        print(row)
+        print(row, flush=True)
 
         # Determine winner for this query
         valid = {k: v for k, v in avgs.items() if v is not None}
@@ -287,7 +313,7 @@ def main():
         "ingest_times": {c["name"]: ingest_times[c["name"]] for c in CONFIGS},
     }
 
-    outfile = f"benchmark/tpch_4way_sf{sf}.json"
+    outfile = f"benchmark/tpch_4way_{storage}_sf{sf}.json"
     with open(outfile, "w") as f:
         json.dump(results, f, indent=2)
     print(f"\nResults saved to {outfile}")
