@@ -11,4 +11,5 @@ scripts/data/
 
 # Benchmark artifacts
 __benchmark_*
+__bench_*
 benchmark/tpch_results_sf1.json

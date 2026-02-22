@@ -1,0 +1,183 @@
+{
+  "config": {
+    "sf": 1.0,
+    "iterations": 3,
+    "s3_endpoint": "127.0.0.1:5555"
+  },
+  "ingest": {
+    "parquet_s3": null,
+    "duckdb_s3": 12.769627332687378
+  },
+  "queries": {
+    "1": {
+      "parquet_avg": null,
+      "duckdb_avg": 29.32353663444519,
+      "parquet_times": [],
+      "duckdb_times": [
+        29.37520980834961,
+        29.57953691482544,
+        29.015863180160522
+      ]
+    },
+    "2": {
+      "parquet_avg": null,
+      "duckdb_avg": 1.841188112894694,
+      "parquet_times": [],
+      "duckdb_times": [
+        1.8017075061798096,
+        1.906883716583252,
+        1.8149731159210205
+      ]
+    },
+    "3": {
+      "parquet_avg": null,
+      "duckdb_avg": 24.64847493171692,
+      "parquet_times": [],
+      "duckdb_times": [
+        24.603770971298218,
+        25.07809090614319,
+        24.26356291770935
+      ]
+    },
+    "4": {
+      "parquet_avg": null,
+      "duckdb_avg": 23.28039264678955,
+      "parquet_times": [],
+      "duckdb_times": [
+        22.98879623413086,
+        23.39039945602417,
+        23.461982250213623
+      ]
+    },
+    "5": {
+      "parquet_avg": null,
+      "duckdb_avg": 30.342368364334106,
+      "parquet_times": [],
+      "duckdb_times": [
+        30.20759677886963,
+        30.706743001937866,
+        30.112765312194824
+      ]
+    },
+    "6": {
+      "parquet_avg": null,
+      "duckdb_avg": 29.145450353622437,
+      "parquet_times": [],
+      "duckdb_times": [
+        29.21315908432007,
+        29.280827045440674,
+        28.942364931106567
+      ]
+    },
+    "7": {
+      "parquet_avg": null,
+      "duckdb_avg": 30.10090096791585,
+      "parquet_times": [],
+      "duckdb_times": [
+        30.582356452941895,
+        29.973183155059814,
+        29.74716329574585
+      ]
+    },
+    "8": {
+      "parquet_avg": null,
+      "duckdb_avg": 24.762346665064495,
+      "parquet_times": [],
+      "duckdb_times": [
+        24.71626615524292,
+        24.322964906692505,
+        25.247808933258057
+      ]
+    },
+    "9": {
+      "parquet_avg": null,
+      "duckdb_avg": null,
+      "parquet_times": [],
+      "duckdb_times": []
+    },
+    "10": {
+      "parquet_avg": null,
+      "duckdb_avg": null,
+      "parquet_times": [],
+      "duckdb_times": []
+    },
+    "11": {
+      "parquet_avg": null,
+      "duckdb_avg": null,
+      "parquet_times": [],
+      "duckdb_times": []
+    },
+    "12": {
+      "parquet_avg": null,
+      "duckdb_avg": null,
+      "parquet_times": [],
+      "duckdb_times": []
+    },
+    "13": {
+      "parquet_avg": null,
+      "duckdb_avg": null,
+      "parquet_times": [],
+      "duckdb_times": []
+    },
+    "14": {
+      "parquet_avg": null,
+      "duckdb_avg": null,
+      "parquet_times": [],
+      "duckdb_times": []
+    },
+    "15": {
+      "parquet_avg": null,
+      "duckdb_avg": null,
+      "parquet_times": [],
+      "duckdb_times": []
+    },
+    "16": {
+      "parquet_avg": null,
+      "duckdb_avg": null,
+      "parquet_times": [],
+      "duckdb_times": []
+    },
+    "17": {
+      "parquet_avg": null,
+      "duckdb_avg": null,
+      "parquet_times": [],
+      "duckdb_times": []
+    },
+    "18": {
+      "parquet_avg": null,
+      "duckdb_avg": null,
+      "parquet_times": [],
+      "duckdb_times": []
+    },
+    "19": {
+      "parquet_avg": null,
+      "duckdb_avg": null,
+      "parquet_times": [],
+      "duckdb_times": []
+    },
+    "20": {
+      "parquet_avg": null,
+      "duckdb_avg": null,
+      "parquet_times": [],
+      "duckdb_times": []
+    },
+    "21": {
+      "parquet_avg": null,
+      "duckdb_avg": null,
+      "parquet_times": [],
+      "duckdb_times": []
+    },
+    "22": {
+      "parquet_avg": null,
+      "duckdb_avg": null,
+      "parquet_times": [],
+      "duckdb_times": []
+    }
+  },
+  "summary": {
+    "pq_total_query_time": 0.0,
+    "db_total_query_time": 0.0,
+    "pq_wins": 0,
+    "db_wins": 0
+  }
+}
