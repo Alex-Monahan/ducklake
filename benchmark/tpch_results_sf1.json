@@ -1,0 +1,32 @@
+{
+  "1": {
+    "parquet_ducklake": 0.4830811023712158,
+    "duckdb_s3": null,
+    "duckdb_local": 0.30510695775349933
+  },
+  "3": {
+    "parquet_ducklake": 0.5399754842122396,
+    "duckdb_s3": null,
+    "duckdb_local": 0.45849037170410156
+  },
+  "5": {
+    "parquet_ducklake": 0.596199115117391,
+    "duckdb_s3": null,
+    "duckdb_local": 0.4435226122538249
+  },
+  "6": {
+    "parquet_ducklake": 0.408025582631429,
+    "duckdb_s3": null,
+    "duckdb_local": 0.2447972297668457
+  },
+  "10": {
+    "parquet_ducklake": 0.6237587134043375,
+    "duckdb_s3": null,
+    "duckdb_local": 0.5432860851287842
+  },
+  "14": {
+    "parquet_ducklake": 0.47074119249979657,
+    "duckdb_s3": null,
+    "duckdb_local": 0.3302561442057292
+  }
+}
