@@ -9,6 +9,11 @@ if(NOT DEFINED ENV{DISABLE_EXTENSIONS_FOR_TEST})
     duckdb_extension_load(icu)
     duckdb_extension_load(json)
     duckdb_extension_load(tpch)
+    duckdb_extension_load(httpfs
+        GIT_URL https://github.com/Alex-Monahan/duckdb-httpfs
+        GIT_TAG claude/duckdb-s3-streaming-writes-WCPED
+        INCLUDE_DIR src/include
+    )
 endif()
 
 set(EXTENSION_CONFIG_BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/.github/config/extensions/")

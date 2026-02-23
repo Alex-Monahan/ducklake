@@ -96,6 +96,13 @@ static unique_ptr<FunctionData> DuckLakeSetOptionBind(ClientContext &context, Ta
 		value = val.CastAs(context, LogicalType::BOOLEAN).GetValue<bool>() ? "true" : "false";
 	} else if (option == "per_thread_output") {
 		value = val.CastAs(context, LogicalType::BOOLEAN).GetValue<bool>() ? "true" : "false";
+	} else if (option == "data_file_format") {
+		auto format = StringUtil::Lower(val.DefaultCastAs(LogicalType::VARCHAR).GetValue<string>());
+		if (format != "parquet" && format != "duckdb") {
+			throw NotImplementedException("Unsupported data file format \"%s\", supported options are: parquet, duckdb",
+			                              format);
+		}
+		value = format;
 	} else {
 		throw NotImplementedException("Unsupported option %s", option);
 	}

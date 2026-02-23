@@ -392,7 +392,7 @@ unique_ptr<BaseStatistics> DuckLakeColumnVariantStats::ToStats() const {
 bool DuckLakeColumnVariantStats::ParseStats(const string &stats_name, const vector<Value> &stats_children) {
 	if (stats_name == "variant_type") {
 		auto type_str = StringValue::Get(stats_children[1]);
-		variant_type = UnboundType::TryParseAndDefaultBind(type_str);
+		variant_type = TransformStringToLogicalType(type_str);
 		return true;
 	}
 	return false;

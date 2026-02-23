@@ -65,6 +65,8 @@ struct DuckLakeDataFile {
 	optional_idx max_partial_file_snapshot;
 	//! If the file was created by ducklake
 	bool created_by_ducklake = true;
+	//! The file format (default: "parquet", can also be "duckdb")
+	string file_format = "parquet";
 };
 
 } // namespace duckdb
