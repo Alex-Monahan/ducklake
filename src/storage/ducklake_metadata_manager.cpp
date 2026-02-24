@@ -2845,9 +2845,11 @@ string DuckLakeMetadataManager::WriteNewDataFiles(const vector<DuckLakeFileInfo>
 		string footer_size = file.footer_size.IsValid() ? to_string(file.footer_size.GetIndex()) : "NULL";
 		string mapping = file.mapping_id.IsValid() ? to_string(file.mapping_id.index) : "NULL";
 		auto path = GetRelativePath(file.table_id, file.file_name, new_tables, new_schemas_result);
+		auto file_format = file.file_format.empty() ? "parquet" : file.file_format;
 		data_file_insert_query += StringUtil::Format(
-		    "(%d, %d, %s, NULL, NULL, %s, %s, 'parquet', %d, %d, %s, %s, %s, %s, %s, %s)", data_file_index, table_id,
-		    begin_snapshot, SQLString(path.path), path.path_is_relative ? "true" : "false", file.row_count,
+		    "(%d, %d, %s, NULL, NULL, %s, %s, %s, %d, %d, %s, %s, %s, %s, %s, %s)", data_file_index, table_id,
+		    begin_snapshot, SQLString(path.path), path.path_is_relative ? "true" : "false",
+		    SQLString(file_format), file.row_count,
 		    file.file_size_bytes, footer_size, row_id, partition_id, encryption_key, mapping, partial_max);
 		for (auto &column_stats : file.column_stats) {
 			if (!column_stats_insert_query.empty()) {
@@ -3580,9 +3582,7 @@ WHERE table_id=tid AND column_id=cid;
 	return batch_query;
 }
 
-template <class T>
-static timestamp_tz_t GetTimestampTZFromRow(ClientContext &context, const T &row, idx_t col_idx) {
-	auto val = row.GetChunk().GetValue(col_idx, row.GetRowInChunk());
+static timestamp_tz_t GetTimestampTZFromRow(ClientContext &context, const Value &val) {
 	return val.CastAs(context, LogicalType::TIMESTAMP_TZ).template GetValue<timestamp_tz_t>();
 }
 
@@ -3604,12 +3604,12 @@ ORDER BY snapshot_id
 	for (auto &row : *res) {
 		DuckLakeSnapshotInfo snapshot_info;
 		snapshot_info.id = row.GetValue<idx_t>(0);
-		snapshot_info.time = GetTimestampTZFromRow(*context, row, 1);
+		snapshot_info.time = GetTimestampTZFromRow(*context, row.GetBaseValue(1));
 		snapshot_info.schema_version = row.GetValue<idx_t>(2);
 		snapshot_info.change_info.changes_made = row.IsNull(3) ? string() : row.GetValue<string>(3);
-		snapshot_info.author = row.GetChunk().GetValue(4, row.GetRowInChunk());
-		snapshot_info.commit_message = row.GetChunk().GetValue(5, row.GetRowInChunk());
-		snapshot_info.commit_extra_info = row.GetChunk().GetValue(6, row.GetRowInChunk());
+		snapshot_info.author = row.GetBaseValue(4);
+		snapshot_info.commit_message = row.GetBaseValue(5);
+		snapshot_info.commit_extra_info = row.GetBaseValue(6);
 		snapshots.push_back(std::move(snapshot_info));
 	}
 	return snapshots;
@@ -3633,7 +3633,7 @@ FROM {METADATA_CATALOG}.ducklake_files_scheduled_for_deletion
 		path.path = row.GetValue<string>(1);
 		path.path_is_relative = row.GetValue<bool>(2);
 		info.path = FromRelativePath(path);
-		info.time = GetTimestampTZFromRow(*context, row, 3);
+		info.time = GetTimestampTZFromRow(*context, row.GetBaseValue(3));
 		result.push_back(std::move(info));
 	}
 	return result;

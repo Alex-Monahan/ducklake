@@ -124,7 +124,7 @@ string DuckLakeTypes::ToString(const LogicalType &type) {
 		if (IsGeoType(type)) {
 			return "geometry";
 		}
-		if (type.id() == LogicalTypeId::UNBOUND) {
+		if (type.id() == LogicalTypeId::UNKNOWN) {
 			const auto type_name = type.GetAlias();
 			if (StringUtil::Lower(type_name) == "json") {
 				return "json";

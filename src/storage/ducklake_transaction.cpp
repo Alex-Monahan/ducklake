@@ -97,8 +97,7 @@ Connection &DuckLakeTransaction::GetConnection() {
 		client_data.catalog_search_path->Set(metadata_entry, CatalogSetPathType::SET_DIRECTLY);
 
 		// set max error reporting to 0 so that during error reporting we don't traverse other schemas / catalogs
-		auto &client_config = ClientConfig::GetConfig(*connection->context);
-		client_config.user_settings.SetUserSetting(CatalogErrorMaxSchemasSetting::SettingIndex, Value::UBIGINT(0));
+		connection->Query("SET catalog_error_max_schemas = 0");
 		connection->BeginTransaction();
 	}
 	return *connection;
@@ -1331,6 +1330,7 @@ DuckLakeFileInfo DuckLakeTransaction::GetNewDataFile(DuckLakeDataFile &file, Duc
 	data_file.mapping_id = file.mapping_id;
 	data_file.begin_snapshot = file.begin_snapshot;
 	data_file.max_partial_file_snapshot = file.max_partial_file_snapshot;
+	data_file.file_format = file.file_format;
 	// gather the column statistics for this file
 	for (auto &column_stats_entry : file.column_stats) {
 		auto column_stats =
