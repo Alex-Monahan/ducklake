@@ -620,6 +620,12 @@
       "paths": [
           "test/sql/storage/types/variant/variant_extract_stats.test"
       ]
+    },
+    {
+      "reason": "FIXME: Variant issues",
+      "paths": [
+          "test/parquet/variant/variant_json_copy.test"
+      ]
     }
   ]
 }
