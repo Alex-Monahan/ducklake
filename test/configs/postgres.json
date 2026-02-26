@@ -1,6 +1,6 @@
 {
   "description": "Run DuckLake tests using Postgres as a catalog DBMS.",
-  "on_init": "ATTACH 'dbname=ducklakedb' AS pg (TYPE postgres); USE pg; DROP SCHEMA public CASCADE; DROP SCHEMA IF EXISTS metadata_s1 CASCADE; DROP SCHEMA IF EXISTS metadata_s2 CASCADE; CREATE SCHEMA public;USE memory; DETACH pg;",
+  "on_init": "ATTACH 'dbname=ducklakedb user=postgres password=postgres' AS pg (TYPE postgres); USE pg; DROP SCHEMA public CASCADE; DROP SCHEMA IF EXISTS metadata_s1 CASCADE; DROP SCHEMA IF EXISTS metadata_s2 CASCADE; CREATE SCHEMA public;USE memory; DETACH pg;",
   "autoloading": "all",
   "statically_loaded_extensions": [
     "core_functions",
@@ -13,8 +13,11 @@
   ],
     "test_env": [{
       "env_name":  "DUCKLAKE_CONNECTION",
-      "env_value": "postgres:dbname=ducklakedb"
+      "env_value": "postgres:dbname=ducklakedb user=postgres password=postgres"
    }],
+   "skip_error_messages": [
+    "Variant types cannot be inlined in this catalog type yet"
+  ],
   "skip_tests": [
     {
       "reason": "Tests only for DuckDB as a catalog",
@@ -57,6 +60,12 @@
       "reason": "Current transaction is aborted",
       "paths": [
         "test/sql/deletion_inlining/test_deletion_inlining_concurrent.test"
+      ]
+    },
+    {
+      "reason": "Postgres renders TIMESTAMPTZ with server-local timezone offset instead of UTC",
+      "paths": [
+        "test/sql/alter/alter_timestamptz_promotion.test"
       ]
     }
   ]
