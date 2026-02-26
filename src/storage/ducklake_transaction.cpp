@@ -2,6 +2,7 @@
 
 #include "common/ducklake_types.hpp"
 #include "common/ducklake_util.hpp"
+#include "metadata_manager/postgres_metadata_manager.hpp"
 #include "duckdb/common/thread.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/catalog/catalog_entry/scalar_macro_catalog_entry.hpp"
@@ -1792,7 +1793,219 @@ bool RetryOnError(const string &original_message) {
 	if (StringUtil::Contains(message, "concurrent")) {
 		return true;
 	}
+	// retry on aborted transaction state (Postgres: "current transaction is aborted")
+	if (StringUtil::Contains(message, "aborted")) {
+		return true;
+	}
 	return false;
+}
+
+void DuckLakeTransaction::FlushChangesStoredProc() {
+	auto &postgres_manager = dynamic_cast<PostgresMetadataManager &>(*metadata_manager);
+
+	// Get the snapshot and transaction changes
+	auto transaction_snapshot = GetSnapshot();
+	auto transaction_changes = GetTransactionChanges();
+
+	// Set stored procedure mode so FormatCatalogId/FormatFileId emit placeholders
+	postgres_manager.SetStoredProcedureMode(transaction_snapshot.next_catalog_id, transaction_snapshot.next_file_id);
+
+	// Build the commit snapshot (same as the regular path)
+	DuckLakeSnapshot commit_snapshot = transaction_snapshot;
+	commit_snapshot.snapshot_id++;
+	bool schema_changed = SchemaChangesMade();
+	if (schema_changed) {
+		commit_snapshot.schema_version++;
+	}
+
+	// Build the batch SQL with placeholders
+	DuckLakeCommitState commit_state(commit_snapshot);
+	string batch_queries = metadata_manager->InsertSnapshot();
+	batch_queries += CommitChanges(commit_state, transaction_changes, nullptr);
+	batch_queries += WriteSnapshotChanges(commit_state, transaction_changes);
+
+	// Compute deltas (how many catalog/file IDs were allocated)
+	idx_t delta_catalog = commit_snapshot.next_catalog_id - transaction_snapshot.next_catalog_id;
+	idx_t delta_file = commit_snapshot.next_file_id - transaction_snapshot.next_file_id;
+
+	// Extract the changes_made string from the batch SQL
+	// WriteSnapshotChanges already embedded it in the INSERT statement, but we also need it
+	// separately for the stored procedure's conflict detection parameter.
+	// The changes_made is the string between the snapshot_changes INSERT values.
+	// We rebuild it by looking at what WriteSnapshotChanges generated in the metadata_manager call.
+	// The simplest approach: parse the changes from the transaction_changes struct which
+	// WriteSnapshotChanges already populated (it modified transaction_changes in place).
+	// At this point transaction_changes has been fully populated by WriteSnapshotChanges.
+	SnapshotChangeInfo change_info;
+	{
+		for (auto &entry : transaction_changes.dropped_schemas) {
+			if (!change_info.changes_made.empty()) {
+				change_info.changes_made += ",";
+			}
+			change_info.changes_made += "dropped_schema:";
+			change_info.changes_made += to_string(entry.first.index);
+		}
+		AddChangeInfo(commit_state, change_info, transaction_changes.dropped_tables, "dropped_table");
+		AddChangeInfo(commit_state, change_info, transaction_changes.dropped_views, "dropped_view");
+		for (auto &created_schema : transaction_changes.created_schemas) {
+			if (!change_info.changes_made.empty()) {
+				change_info.changes_made += ",";
+			}
+			change_info.changes_made += "created_schema:";
+			change_info.changes_made += KeywordHelper::WriteQuoted(created_schema, '"');
+		}
+		for (auto &entry : transaction_changes.created_tables) {
+			auto &schema = entry.first;
+			auto schema_prefix = KeywordHelper::WriteQuoted(schema, '"') + ".";
+			for (auto &created_table : entry.second) {
+				if (!change_info.changes_made.empty()) {
+					change_info.changes_made += ",";
+				}
+				auto is_view = created_table.get().type == CatalogType::VIEW_ENTRY;
+				change_info.changes_made += is_view ? "created_view:" : "created_table:";
+				change_info.changes_made += schema_prefix + KeywordHelper::WriteQuoted(created_table.get().name, '"');
+			}
+		}
+		for (auto &entry : transaction_changes.created_scalar_macros) {
+			auto &schema = entry.first;
+			auto schema_prefix = KeywordHelper::WriteQuoted(schema, '"') + ".";
+			for (auto &created_macro : entry.second) {
+				if (!change_info.changes_made.empty()) {
+					change_info.changes_made += ",";
+				}
+				change_info.changes_made += "created_scalar_macro:";
+				change_info.changes_made += schema_prefix + KeywordHelper::WriteQuoted(created_macro.get().name, '"');
+			}
+		}
+		for (auto &entry : transaction_changes.created_table_macros) {
+			auto &schema = entry.first;
+			auto schema_prefix = KeywordHelper::WriteQuoted(schema, '"') + ".";
+			for (auto &created_macro : entry.second) {
+				if (!change_info.changes_made.empty()) {
+					change_info.changes_made += ",";
+				}
+				change_info.changes_made += "created_table_macro:";
+				change_info.changes_made += schema_prefix + KeywordHelper::WriteQuoted(created_macro.get().name, '"');
+			}
+		}
+		for (auto &entry : transaction_changes.dropped_scalar_macros) {
+			if (!change_info.changes_made.empty()) {
+				change_info.changes_made += ",";
+			}
+			change_info.changes_made += "dropped_scalar_macro:";
+			change_info.changes_made += to_string(entry.index);
+		}
+		for (auto &entry : transaction_changes.dropped_table_macros) {
+			if (!change_info.changes_made.empty()) {
+				change_info.changes_made += ",";
+			}
+			change_info.changes_made += "dropped_table_macro:";
+			change_info.changes_made += to_string(entry.index);
+		}
+		AddChangeInfo(commit_state, change_info, transaction_changes.tables_inserted_into, "inserted_into_table");
+		AddChangeInfo(commit_state, change_info, transaction_changes.tables_deleted_from, "deleted_from_table");
+		AddChangeInfo(commit_state, change_info, transaction_changes.altered_tables, "altered_table");
+		AddChangeInfo(commit_state, change_info, transaction_changes.altered_views, "altered_view");
+		AddChangeInfo(commit_state, change_info, transaction_changes.tables_inserted_inlined, "inlined_insert");
+		AddChangeInfo(commit_state, change_info, transaction_changes.tables_deleted_inlined, "inlined_delete");
+		AddChangeInfo(commit_state, change_info, transaction_changes.tables_flushed_inlined, "inline_flush");
+		AddChangeInfo(commit_state, change_info, transaction_changes.tables_merge_adjacent, "merge_adjacent");
+		AddChangeInfo(commit_state, change_info, transaction_changes.tables_rewrite_delete, "rewrite_delete");
+	}
+
+	// Read retry settings
+	idx_t max_retry_count = 10;
+	idx_t retry_wait_ms = 100;
+	double retry_backoff = 1.5;
+	Value setting_val;
+	auto context_ref = context.lock();
+	if (context_ref->TryGetCurrentSetting("ducklake_max_retry_count", setting_val)) {
+		max_retry_count = setting_val.GetValue<idx_t>();
+	}
+	if (context_ref->TryGetCurrentSetting("ducklake_retry_wait_ms", setting_val)) {
+		retry_wait_ms = setting_val.GetValue<idx_t>();
+	}
+	if (context_ref->TryGetCurrentSetting("ducklake_retry_backoff", setting_val)) {
+		retry_backoff = setting_val.GetValue<double>();
+	}
+
+	// Retry loop: each attempt calls the stored function in a fresh Postgres transaction.
+	// The stored function (ducklake_try_commit) reads the latest snapshot, checks conflicts,
+	// resolves placeholders, and executes the batch SQL. If it hits a PK violation
+	// (another transaction committed first), we rollback, start a new transaction, and retry.
+	for (idx_t i = 0; i < max_retry_count + 1; i++) {
+		try {
+			// Ensure stored procedures exist in Postgres
+			postgres_manager.EnsureStoredProceduresExist();
+
+			// Execute the stored function (single attempt, no internal retry)
+			auto res = postgres_manager.ExecuteStoredProcCommit(
+			    transaction_snapshot, batch_queries, schema_changed,
+			    transaction_snapshot.snapshot_id, change_info.changes_made,
+			    delta_catalog, delta_file);
+
+			if (res->HasError()) {
+				res->GetErrorObject().Throw("Failed to flush changes into DuckLake via stored procedure: ");
+			}
+
+			// Parse the result to get the actual snapshot_id and schema_version
+			auto chunk = res->Fetch();
+			if (chunk && chunk->size() > 0) {
+				auto result_snapshot_id = chunk->GetValue(0, 0);
+				auto result_schema_version = chunk->GetValue(1, 0);
+				if (!result_snapshot_id.IsNull()) {
+					commit_snapshot.snapshot_id = result_snapshot_id.GetValue<idx_t>();
+				}
+				if (!result_schema_version.IsNull()) {
+					commit_snapshot.schema_version = result_schema_version.GetValue<idx_t>();
+				}
+			}
+
+			// Commit the Postgres transaction
+			connection->Commit();
+
+			catalog_version = commit_snapshot.schema_version;
+			ducklake_catalog.SetCommittedSnapshotId(commit_snapshot.snapshot_id);
+			return;
+		} catch (std::exception &ex) {
+			ErrorData error(ex);
+			// Rollback if there is an active transaction
+			auto has_active_transaction = connection->context->transaction.HasActiveTransaction();
+			if (has_active_transaction) {
+				connection->Rollback();
+			}
+			// Don't retry on genuine transaction conflicts (from ducklake_check_conflicts)
+			bool is_genuine_conflict = StringUtil::Contains(error.Message(), "Transaction conflict");
+			bool retry_on_error = RetryOnError(error.Message());
+			bool finished_retrying = i + 1 >= max_retry_count;
+			if (is_genuine_conflict || !retry_on_error || finished_retrying) {
+				CleanupFiles();
+				std::ostringstream error_message;
+				error_message << "Failed to commit DuckLake transaction." << '\n';
+				if (finished_retrying) {
+					error_message << "Exceeded the maximum retry count of " << max_retry_count
+					              << " set by the ducklake_max_retry_count setting." << '\n'
+					              << ". Consider increasing the value with: e.g., \"SET ducklake_max_retry_count = "
+					              << max_retry_count * 10 << ";\"" << '\n';
+				}
+				error.Throw(error_message.str());
+			}
+
+#ifndef DUCKDB_NO_THREADS
+			RandomEngine random;
+			double random_multiplier = (random.NextRandom() + 1.0) / 2.0;
+			uint64_t sleep_amount =
+			    (uint64_t)((double)retry_wait_ms * random_multiplier * pow(retry_backoff, static_cast<double>(i)));
+			std::this_thread::sleep_for(std::chrono::milliseconds(sleep_amount));
+#endif
+
+			// Start a fresh transaction for the retry (so the stored function sees latest committed data)
+			connection->BeginTransaction();
+			snapshot.reset();
+			// Functions may have been rolled back, need to recreate on next attempt
+			postgres_manager.ResetProceduresCreated();
+		}
+	}
 }
 
 void DuckLakeTransaction::FlushChanges() {
@@ -1813,6 +2026,27 @@ void DuckLakeTransaction::FlushChanges() {
 	}
 	if (context_ref->TryGetCurrentSetting("ducklake_retry_backoff", setting_val)) {
 		retry_backoff = setting_val.GetValue<double>();
+	}
+
+	// Check if we can use the stored procedure path:
+	// 1. Must be Postgres metadata catalog
+	// 2. Must have no inline data insert/delete operations
+	bool can_use_stored_proc = (ducklake_catalog.MetadataType() == "postgres" ||
+	                            ducklake_catalog.MetadataType() == "postgres_scanner");
+	if (can_use_stored_proc) {
+		for (auto &entry : table_data_changes) {
+			if (entry.second.new_inlined_data ||
+			    !entry.second.new_inlined_data_deletes.empty() ||
+			    entry.second.new_inlined_file_deletes) {
+				can_use_stored_proc = false;
+				break;
+			}
+		}
+	}
+
+	if (can_use_stored_proc) {
+		FlushChangesStoredProc();
+		return;
 	}
 
 	auto transaction_snapshot = GetSnapshot();
