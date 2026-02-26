@@ -23,7 +23,8 @@ enum class ChangeType {
 	CREATED_SCALAR_MACRO,
 	CREATED_TABLE_MACRO,
 	DROPPED_SCALAR_MACRO,
-	DROPPED_TABLE_MACRO
+	DROPPED_TABLE_MACRO,
+	CREATED_IN_SCHEMA_ID
 };
 
 struct ChangeInfo {
@@ -80,6 +81,8 @@ ChangeType ParseChangeType(const string &changes_made, idx_t &pos) {
 	} else if (StringUtil::CIEquals(change_type_str, "flushed_inlined") ||
 	           StringUtil::CIEquals(change_type_str, "inline_flush")) {
 		return ChangeType::FLUSHED_INLINE_DATA_FOR_TABLE;
+	} else if (StringUtil::CIEquals(change_type_str, "created_in_schema_id")) {
+		return ChangeType::CREATED_IN_SCHEMA_ID;
 	} else {
 		throw InvalidInputException("Unsupported change type %s", change_type_str);
 	}
@@ -206,6 +209,9 @@ SnapshotChangeInformation SnapshotChangeInformation::ParseChangesMade(const stri
 			break;
 		case ChangeType::FLUSHED_INLINE_DATA_FOR_TABLE:
 			result.tables_flushed_inlined.insert(TableIndex(StringUtil::ToUnsigned(entry.change_value)));
+			break;
+		case ChangeType::CREATED_IN_SCHEMA_ID:
+			result.created_in_schema_ids.insert(SchemaIndex(StringUtil::ToUnsigned(entry.change_value)));
 			break;
 		default:
 			throw InternalException("Unsupported change type in ParseChangesMade");

@@ -416,6 +416,7 @@ SnapshotChangeInfo DuckLakeTransaction::BuildSnapshotChangeInfo(DuckLakeCommitSt
 		change_info.changes_made += "created_schema:";
 		change_info.changes_made += KeywordHelper::WriteQuoted(created_schema, '"');
 	}
+	set<SchemaIndex> created_in_schema_ids;
 	for (auto &entry : changes.created_tables) {
 		auto &schema = entry.first;
 		auto schema_prefix = KeywordHelper::WriteQuoted(schema, '"') + ".";
@@ -426,7 +427,17 @@ SnapshotChangeInfo DuckLakeTransaction::BuildSnapshotChangeInfo(DuckLakeCommitSt
 			auto is_view = created_table.get().type == CatalogType::VIEW_ENTRY;
 			change_info.changes_made += is_view ? "created_view:" : "created_table:";
 			change_info.changes_made += schema_prefix + KeywordHelper::WriteQuoted(created_table.get().name, '"');
+			// Track schema_ids for cross-check with dropped_schema
+			auto &parent_schema = created_table.get().ParentSchema().Cast<DuckLakeSchemaEntry>();
+			created_in_schema_ids.insert(parent_schema.GetSchemaId());
 		}
+	}
+	for (auto &schema_id : created_in_schema_ids) {
+		if (!change_info.changes_made.empty()) {
+			change_info.changes_made += ",";
+		}
+		change_info.changes_made += "created_in_schema_id:";
+		change_info.changes_made += to_string(schema_id.index);
 	}
 
 	for (auto &entry : changes.created_scalar_macros) {
@@ -1336,7 +1347,8 @@ struct NewDataInfo {
 };
 
 NewDataInfo DuckLakeTransaction::GetNewDataFiles(string &batch_query, DuckLakeCommitState &commit_state,
-                                                 optional_ptr<vector<DuckLakeGlobalStatsInfo>> stats) {
+                                                 optional_ptr<vector<DuckLakeGlobalStatsInfo>> stats,
+                                                 bool skip_existing_table_stats) {
 	NewDataInfo result;
 	// get the global table stats
 	DuckLakeNewGlobalStats new_globals;
@@ -1425,7 +1437,10 @@ NewDataInfo DuckLakeTransaction::GetNewDataFiles(string &batch_query, DuckLakeCo
 			}
 		}
 		// update the global stats for this table based on the newly written data
-		batch_query += UpdateGlobalTableStats(table_id, new_globals);
+		// For stored proc commits: skip stats for existing tables (refreshed post-commit with fresh data)
+		if (!skip_existing_table_stats || entry.first.IsTransactionLocal()) {
+			batch_query += UpdateGlobalTableStats(table_id, new_globals);
+		}
 	}
 	return result;
 }
@@ -1550,7 +1565,8 @@ struct CompactionInformation {
 
 string DuckLakeTransaction::CommitChanges(DuckLakeCommitState &commit_state,
                                           TransactionChangeInformation &transaction_changes,
-                                          optional_ptr<vector<DuckLakeGlobalStatsInfo>> stats) {
+                                          optional_ptr<vector<DuckLakeGlobalStatsInfo>> stats,
+                                          bool skip_existing_table_stats) {
 	auto &commit_snapshot = commit_state.commit_snapshot;
 
 	if (ducklake_catalog.IsCommitInfoRequired() && !commit_info.is_commit_info_set) {
@@ -1640,7 +1656,7 @@ string DuckLakeTransaction::CommitChanges(DuckLakeCommitState &commit_state,
 
 	// write new data / data files
 	if (!table_data_changes.empty()) {
-		auto result = GetNewDataFiles(batch_queries, commit_state, stats);
+		auto result = GetNewDataFiles(batch_queries, commit_state, stats, skip_existing_table_stats);
 		batch_queries += metadata_manager->WriteNewDataFiles(result.new_files, new_tables_result, new_schemas_result);
 		batch_queries += metadata_manager->WriteNewInlinedData(commit_snapshot, result.new_inlined_data,
 		                                                       new_tables_result, new_inlined_data_tables_result);
@@ -1818,7 +1834,10 @@ void DuckLakeTransaction::FlushChangesViaStoredProc() {
 	auto sentinel = DuckLakeMetadataManager::OFFSET_ID_SENTINEL;
 	DuckLakeSnapshot offset_snapshot(0, 0, sentinel, sentinel);
 	DuckLakeCommitState commit_state(offset_snapshot);
-	string batch_queries = CommitChanges(commit_state, transaction_changes, nullptr);
+	// skip_existing_table_stats=true: stats for existing tables will be refreshed
+	// post-commit with fresh visibility, so the retry loop sees correct concurrent data
+	string batch_queries = CommitChanges(commit_state, transaction_changes, nullptr,
+	                                     /*skip_existing_table_stats=*/true);
 
 	// Build the changes_made string and snapshot changes SQL
 	auto change_info = BuildSnapshotChangeInfo(commit_state, transaction_changes);
@@ -1831,54 +1850,169 @@ void DuckLakeTransaction::FlushChangesViaStoredProc() {
 	// Disable offset mode
 	metadata_manager->SetOffsetMode(false);
 
-	// Call the stored procedure (1 round trip for commit logic)
-	// The batch_queries still have {METADATA_CATALOG} etc. placeholders that need resolving
-	// These are resolved by the postgres_execute/postgres_query path
-	// But for the stored proc, we need the SQL with schema already resolved since it runs inside Postgres
-	// The stored proc receives the SQL with {FILE_ID_BASE}, {CATALOG_ID_BASE}, {SNAPSHOT_ID}, {SCHEMA_VERSION}
-	// placeholders, but {METADATA_CATALOG} needs to be resolved before sending
-
-	// Build the stored proc call - pass all SQL and metadata through postgres_query
+	// Build the CALL to the stored procedure
+	// The batch SQL has {METADATA_CATALOG} placeholders that need resolving before sending to Postgres
+	// The snapshot placeholders ({FILE_ID_BASE}, {CATALOG_ID_BASE}, {SNAPSHOT_ID}, {SCHEMA_VERSION})
+	// are resolved by the stored procedure at commit time
 	auto &ducklake_catalog = GetCatalog();
 	auto schema_identifier = DuckLakeUtil::SQLIdentifierToString(ducklake_catalog.MetadataSchemaName());
 	auto schema_identifier_escaped = StringUtil::Replace(schema_identifier, "'", "''");
 
-	// Resolve {METADATA_CATALOG} in the batch SQL (but NOT the snapshot placeholders -
-	// those are resolved by the stored procedure at commit time)
+	// Resolve {METADATA_CATALOG} in the batch SQL (but NOT the snapshot placeholders)
 	auto resolved_batch = StringUtil::Replace(batch_queries, "{METADATA_CATALOG}", schema_identifier_escaped);
 	auto resolved_changes = StringUtil::Replace(changes_sql, "{METADATA_CATALOG}", schema_identifier_escaped);
 
-	// Escape single quotes in the SQL for embedding in a Postgres function call
+	// Escape single quotes in the SQL for embedding in a Postgres procedure call
 	auto escaped_batch = StringUtil::Replace(resolved_batch, "'", "''");
 	auto escaped_changes = StringUtil::Replace(resolved_changes, "'", "''");
 	auto escaped_changes_made = StringUtil::Replace(change_info.changes_made, "'", "''");
 
+	// Collect data_file_ids for file-level delete conflict detection
+	string delete_file_ids_str = "ARRAY[";
+	bool first = true;
+	for (auto &entry : table_data_changes) {
+		auto &table_changes = entry.second;
+		for (auto &file_entry : table_changes.new_delete_files) {
+			for (auto &file : file_entry.second) {
+				if (!first) {
+					delete_file_ids_str += ",";
+				}
+				delete_file_ids_str += to_string(file.data_file_id.index);
+				first = false;
+			}
+		}
+	}
+	for (auto &file : dropped_files) {
+		if (!first) {
+			delete_file_ids_str += ",";
+		}
+		delete_file_ids_str += to_string(file.second.index);
+		first = false;
+	}
+	delete_file_ids_str += "]::BIGINT[]";
+
 	string proc_call = StringUtil::Format(
-	    "SELECT * FROM %s.ducklake_commit('%s', NULL, '%s', '%s', %d, %s, %d, %d, %d, %f, %f)",
+	    "CALL %s.ducklake_commit('%s', '%s', '%s', %d, %s, %d, %d, %s, %d, %f, %f)",
 	    schema_identifier_escaped, escaped_batch, escaped_changes, escaped_changes_made,
 	    transaction_snapshot.snapshot_id, SchemaChangesMade() ? "true" : "false",
-	    file_id_count, catalog_id_count, max_retry_count, (double)retry_wait_ms, retry_backoff);
+	    file_id_count, catalog_id_count, delete_file_ids_str,
+	    max_retry_count, (double)retry_wait_ms, retry_backoff);
 
-	// Execute via postgres_query to get results back
+	// Commit current DuckDB transaction (sends COMMIT to Postgres, state -> FINISHED)
+	// Nothing was written to Postgres yet (batch SQL is just a string), so this commits an empty tx
 	auto &conn = GetConnection();
+	connection->Commit();
+
+	// Begin new DuckDB transaction (new PostgresTransaction in NOT_YET_STARTED state)
+	connection->BeginTransaction();
+
 	auto catalog_literal = DuckLakeUtil::SQLLiteralToString(ducklake_catalog.MetadataDatabaseName());
-	auto result = conn.Query(StringUtil::Format("SELECT * FROM postgres_query(%s, %s)",
-	                                            catalog_literal, SQLString(proc_call)));
+
+	// Execute CALL without transaction wrapping — the procedure manages its own transactions
+	// (COMMIT/ROLLBACK inside the retry loop). use_transaction=false sends SQL directly.
+	auto result = conn.Query(StringUtil::Format(
+	    "SELECT * FROM postgres_execute(%s, %s, use_transaction=false)",
+	    catalog_literal, SQLString(proc_call)));
 	if (result->HasError()) {
 		CleanupFiles();
 		result->GetErrorObject().Throw("Failed to commit DuckLake transaction via stored procedure: ");
 	}
 
-	// Extract committed snapshot info from result
+	// Read committed snapshot info from session variables set by ducklake_try_commit
+	// (set_config with is_local=false survives COMMIT)
+	auto read_query = "SELECT current_setting('ducklake.committed_snapshot_id')::BIGINT AS snapshot_id,"
+	                  " current_setting('ducklake.committed_schema_version')::BIGINT AS schema_version";
+	auto read_result = conn.Query(StringUtil::Format(
+	    "SELECT * FROM postgres_query(%s, %s, use_transaction=false)",
+	    catalog_literal, SQLString(string(read_query))));
+	if (read_result->HasError()) {
+		CleanupFiles();
+		read_result->GetErrorObject().Throw("Failed to read commit results: ");
+	}
+
 	idx_t committed_snapshot_id = 0;
 	idx_t committed_schema_version = 0;
-	for (auto &row : *result) {
+	for (auto &row : *read_result) {
 		committed_snapshot_id = row.GetValue<idx_t>(0);
 		committed_schema_version = row.GetValue<idx_t>(1);
 		break;
 	}
 
+	// End the DuckDB transaction cleanly (Postgres side: no-op since NOT_YET_STARTED)
 	connection->Commit();
+
+	// Refresh global stats for existing tables with fresh visibility.
+	// The batch SQL skipped stats for existing tables (skip_existing_table_stats=true)
+	// because the proc's retry loop would use stale stats from the original snapshot.
+	// Now that the commit succeeded, we read current stats and merge in our file data.
+	bool need_stats_refresh = false;
+	for (auto &entry : table_data_changes) {
+		if (entry.first.IsTransactionLocal()) {
+			continue;
+		}
+		auto &table_changes = entry.second;
+		if (!table_changes.new_data_files.empty() || table_changes.new_inlined_data) {
+			need_stats_refresh = true;
+			break;
+		}
+	}
+	if (need_stats_refresh) {
+		// Reset snapshot so GetSnapshot() fetches the latest (including our commit)
+		snapshot.reset();
+		connection->BeginTransaction();
+
+		string stats_batch;
+		for (auto &entry : table_data_changes) {
+			auto table_id = entry.first;
+			if (table_id.IsTransactionLocal()) {
+				continue; // new tables' stats are written in the batch SQL
+			}
+			auto &table_changes = entry.second;
+			if (table_changes.new_data_files.empty() && !table_changes.new_inlined_data) {
+				continue;
+			}
+			DuckLakeNewGlobalStats new_globals;
+			auto current_stats = ducklake_catalog.GetTableStats(*this, table_id);
+			if (current_stats) {
+				new_globals.stats = *current_stats;
+				new_globals.initialized = true;
+			}
+			auto &new_stats = new_globals.stats;
+			for (auto &file : table_changes.new_data_files) {
+				if (!file.max_partial_file_snapshot.IsValid()) {
+					new_stats.record_count += file.row_count;
+					new_stats.next_row_id += file.row_count;
+				}
+				new_stats.table_size_bytes += file.file_size_bytes;
+				for (auto &stat_entry : file.column_stats) {
+					new_stats.MergeStats(stat_entry.first, stat_entry.second);
+				}
+			}
+			if (table_changes.new_inlined_data) {
+				auto &inlined_data = *table_changes.new_inlined_data;
+				idx_t record_count = inlined_data.data->Count();
+				for (auto &stat_entry : inlined_data.column_stats) {
+					new_stats.MergeStats(stat_entry.first, stat_entry.second);
+				}
+				new_stats.record_count += record_count;
+				new_stats.next_row_id += record_count;
+			}
+			stats_batch += UpdateGlobalTableStats(table_id, new_globals);
+		}
+		if (!stats_batch.empty()) {
+			// Query() resolves {METADATA_CATALOG} and executes through the DuckDB connection
+			auto stats_result = Query(stats_batch);
+			if (stats_result->HasError()) {
+				// Stats update is best-effort; don't fail the commit
+				connection->Rollback();
+			} else {
+				connection->Commit();
+			}
+		} else {
+			connection->Commit();
+		}
+	}
+
 	catalog_version = committed_schema_version;
 	ducklake_catalog.SetCommittedSnapshotId(committed_snapshot_id);
 }

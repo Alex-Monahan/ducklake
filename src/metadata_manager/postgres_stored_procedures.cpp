@@ -7,105 +7,161 @@ namespace duckdb {
 
 static string GetStoredProcedureSQL(const string &schema) {
 	// PL/pgSQL stored procedure for atomic commit with retry
-	// {SCHEMA} will be replaced with the actual schema identifier
+	// Split into a helper FUNCTION (single attempt) and a PROCEDURE (retry loop with real COMMIT/ROLLBACK)
+	// This ensures each retry gets a fresh Postgres transaction with full visibility
 	return StringUtil::Format(R"(
 
-CREATE OR REPLACE FUNCTION %s.ducklake_commit(
+-- Drop old function signature (incompatible with the new procedure of the same name)
+DROP FUNCTION IF EXISTS %s.ducklake_commit(TEXT,TEXT,TEXT,TEXT,BIGINT,BOOLEAN,BIGINT,BIGINT,INT,FLOAT,FLOAT);
+
+-- Helper: single commit attempt, returns TRUE on success, FALSE on unique_violation
+-- On success, stores results in session variables (survive COMMIT)
+CREATE OR REPLACE FUNCTION %s.ducklake_try_commit(
     p_batch_sql TEXT,
-    p_snapshot_insert_sql TEXT,
     p_changes_sql TEXT,
     p_our_changes TEXT,
     p_transaction_snapshot_id BIGINT,
     p_schema_changes_made BOOLEAN,
     p_file_id_count BIGINT,
     p_catalog_id_count BIGINT,
-    p_max_retry_count INT DEFAULT 10,
-    p_retry_wait_ms FLOAT DEFAULT 100,
-    p_retry_backoff FLOAT DEFAULT 1.5
-) RETURNS TABLE (snapshot_id BIGINT, schema_version BIGINT,
-                 next_catalog_id BIGINT, next_file_id BIGINT) AS $fn$
+    p_our_delete_file_ids BIGINT[] DEFAULT ARRAY[]::BIGINT[]
+) RETURNS BOOLEAN AS $fn$
 DECLARE
     v_snap RECORD;
     v_new_sid BIGINT;
     v_new_sv BIGINT;
     v_sql TEXT;
-    v_retry INT := 0;
     v_other_changes TEXT;
+    v_conflict_file BIGINT;
 BEGIN
-    LOOP
-        -- Each iteration uses an implicit savepoint via BEGIN...EXCEPTION
-        BEGIN
-            -- 1. Get latest snapshot
-            SELECT s.snapshot_id, s.schema_version, s.next_catalog_id, s.next_file_id
-            INTO v_snap FROM %s.ducklake_snapshot s
-            ORDER BY s.snapshot_id DESC LIMIT 1;
+    -- 1. Get latest snapshot
+    SELECT s.snapshot_id, s.schema_version, s.next_catalog_id, s.next_file_id
+    INTO v_snap FROM %s.ducklake_snapshot s
+    ORDER BY s.snapshot_id DESC LIMIT 1;
 
-            -- 2. Compute new snapshot values
-            v_new_sid := v_snap.snapshot_id + 1;
-            v_new_sv := v_snap.schema_version;
-            IF p_schema_changes_made THEN
-                v_new_sv := v_new_sv + 1;
+    -- 2. Compute new snapshot values
+    v_new_sid := v_snap.snapshot_id + 1;
+    v_new_sv := v_snap.schema_version;
+    IF p_schema_changes_made THEN
+        v_new_sv := v_new_sv + 1;
+    END IF;
+
+    -- 3. Check for semantic conflicts if snapshot changed since our tx started
+    IF v_snap.snapshot_id > p_transaction_snapshot_id THEN
+        SELECT STRING_AGG(sc.changes_made, ',') INTO v_other_changes
+        FROM %s.ducklake_snapshot_changes sc
+        WHERE sc.snapshot_id > p_transaction_snapshot_id;
+
+        IF v_other_changes IS NOT NULL THEN
+            PERFORM %s.ducklake_check_conflicts(
+                p_our_changes, v_other_changes, p_transaction_snapshot_id);
+        END IF;
+
+        -- 3b. File-level delete conflict check
+        -- If we are deleting from files, check that no other transaction
+        -- has also deleted from or dropped the same data files since our snapshot
+        IF array_length(p_our_delete_file_ids, 1) > 0 THEN
+            SELECT f.data_file_id INTO v_conflict_file
+            FROM (
+                SELECT data_file_id FROM %s.ducklake_delete_file
+                WHERE begin_snapshot > p_transaction_snapshot_id
+                UNION ALL
+                SELECT data_file_id FROM %s.ducklake_data_file
+                WHERE end_snapshot IS NOT NULL AND end_snapshot > p_transaction_snapshot_id
+            ) f
+            WHERE f.data_file_id = ANY(p_our_delete_file_ids)
+            LIMIT 1;
+
+            IF v_conflict_file IS NOT NULL THEN
+                RAISE EXCEPTION 'Transaction conflict - attempting to delete from file with index "%%" - but another transaction has deleted from it', v_conflict_file;
             END IF;
+        END IF;
+    END IF;
 
-            -- 3. Check for semantic conflicts if snapshot changed since our tx started
-            IF v_snap.snapshot_id > p_transaction_snapshot_id THEN
-                SELECT STRING_AGG(sc.changes_made, ',') INTO v_other_changes
-                FROM %s.ducklake_snapshot_changes sc
-                WHERE sc.snapshot_id > p_transaction_snapshot_id;
+    -- 4. Resolve placeholders in batch SQL using current snapshot values
+    v_sql := REPLACE(p_batch_sql, '{FILE_ID_BASE}', v_snap.next_file_id::TEXT);
+    v_sql := REPLACE(v_sql, '{CATALOG_ID_BASE}', v_snap.next_catalog_id::TEXT);
+    v_sql := REPLACE(v_sql, '{SNAPSHOT_ID}', v_new_sid::TEXT);
+    v_sql := REPLACE(v_sql, '{SCHEMA_VERSION}', v_new_sv::TEXT);
 
-                IF v_other_changes IS NOT NULL THEN
-                    PERFORM %s.ducklake_check_conflicts(
-                        p_our_changes, v_other_changes, p_transaction_snapshot_id);
-                END IF;
-            END IF;
+    -- 5. Execute the resolved batch SQL
+    IF v_sql IS NOT NULL AND v_sql != '' THEN
+        EXECUTE v_sql;
+    END IF;
 
-            -- 4. Resolve placeholders in batch SQL using current snapshot values
-            v_sql := REPLACE(p_batch_sql, '{FILE_ID_BASE}', v_snap.next_file_id::TEXT);
-            v_sql := REPLACE(v_sql, '{CATALOG_ID_BASE}', v_snap.next_catalog_id::TEXT);
-            v_sql := REPLACE(v_sql, '{SNAPSHOT_ID}', v_new_sid::TEXT);
-            v_sql := REPLACE(v_sql, '{SCHEMA_VERSION}', v_new_sv::TEXT);
+    -- 6. Insert new snapshot with updated counters
+    INSERT INTO %s.ducklake_snapshot VALUES (
+        v_new_sid, NOW(), v_new_sv,
+        v_snap.next_catalog_id + p_catalog_id_count,
+        v_snap.next_file_id + p_file_id_count
+    );
 
-            -- 5. Execute the resolved batch SQL
-            IF v_sql IS NOT NULL AND v_sql != '' THEN
-                EXECUTE v_sql;
-            END IF;
+    -- 7. Insert snapshot changes (resolve placeholders first)
+    IF p_changes_sql IS NOT NULL AND p_changes_sql != '' THEN
+        v_sql := REPLACE(p_changes_sql, '{SNAPSHOT_ID}', v_new_sid::TEXT);
+        v_sql := REPLACE(v_sql, '{SCHEMA_VERSION}', v_new_sv::TEXT);
+        EXECUTE v_sql;
+    END IF;
 
-            -- 6. Insert new snapshot with updated counters
-            INSERT INTO %s.ducklake_snapshot VALUES (
-                v_new_sid, NOW(), v_new_sv,
-                v_snap.next_catalog_id + p_catalog_id_count,
-                v_snap.next_file_id + p_file_id_count
-            );
+    -- 8. Store results in session variables (is_local=false so they survive COMMIT)
+    PERFORM set_config('ducklake.committed_snapshot_id', v_new_sid::TEXT, false);
+    PERFORM set_config('ducklake.committed_schema_version', v_new_sv::TEXT, false);
+    RETURN TRUE;
 
-            -- 7. Insert snapshot changes (resolve placeholders first)
-            IF p_changes_sql IS NOT NULL AND p_changes_sql != '' THEN
-                v_sql := REPLACE(p_changes_sql, '{SNAPSHOT_ID}', v_new_sid::TEXT);
-                v_sql := REPLACE(v_sql, '{SCHEMA_VERSION}', v_new_sv::TEXT);
-                EXECUTE v_sql;
-            END IF;
-
-            -- 8. Success - return committed snapshot info
-            RETURN QUERY SELECT v_new_sid, v_new_sv,
-                v_snap.next_catalog_id + p_catalog_id_count,
-                v_snap.next_file_id + p_file_id_count;
-            RETURN;
-
-        EXCEPTION WHEN unique_violation THEN
-            -- Concurrent commit took our snapshot_id or file_id
-            -- Savepoint is automatically rolled back
-            v_retry := v_retry + 1;
-            IF v_retry > p_max_retry_count THEN
-                RAISE EXCEPTION 'DuckLake: exceeded max retry count (%%) for commit', p_max_retry_count;
-            END IF;
-            -- Exponential backoff with jitter (pg_sleep arg is in seconds)
-            PERFORM pg_sleep(
-                p_retry_wait_ms * power(p_retry_backoff, v_retry - 1)
-                * (0.5 + 0.5 * random()) / 1000.0
-            );
-        END;
-    END LOOP;
+EXCEPTION WHEN unique_violation THEN
+    RETURN FALSE;
 END;
 $fn$ LANGUAGE plpgsql;
+
+-- Main entry point: retry loop with real transaction control
+-- COMMIT/ROLLBACK in a PROCEDURE end the current transaction; the next
+-- loop iteration starts a fresh transaction with full visibility.
+CREATE OR REPLACE PROCEDURE %s.ducklake_commit(
+    p_batch_sql TEXT,
+    p_changes_sql TEXT,
+    p_our_changes TEXT,
+    p_transaction_snapshot_id BIGINT,
+    p_schema_changes_made BOOLEAN,
+    p_file_id_count BIGINT,
+    p_catalog_id_count BIGINT,
+    p_our_delete_file_ids BIGINT[] DEFAULT ARRAY[]::BIGINT[],
+    p_max_retry_count INT DEFAULT 10,
+    p_retry_wait_ms FLOAT DEFAULT 100,
+    p_retry_backoff FLOAT DEFAULT 1.5
+) LANGUAGE plpgsql AS $fn$
+DECLARE
+    v_success BOOLEAN;
+    v_retry INT := 0;
+BEGIN
+    LOOP
+        v_success := %s.ducklake_try_commit(
+            p_batch_sql, p_changes_sql, p_our_changes,
+            p_transaction_snapshot_id, p_schema_changes_made,
+            p_file_id_count, p_catalog_id_count,
+            p_our_delete_file_ids);
+
+        IF v_success THEN
+            COMMIT;   -- commits all writes; session vars survive
+            RETURN;
+        END IF;
+
+        -- try_commit returned FALSE (unique_violation caught internally)
+        -- The savepoint was rolled back but the transaction may be dirty; end it:
+        ROLLBACK;     -- ends transaction; next iteration gets fresh visibility
+
+        v_retry := v_retry + 1;
+        IF v_retry > p_max_retry_count THEN
+            RAISE EXCEPTION 'DuckLake: exceeded max retry count (%%) for commit', p_max_retry_count;
+        END IF;
+
+        -- Exponential backoff with jitter (pg_sleep arg is in seconds)
+        PERFORM pg_sleep(
+            p_retry_wait_ms * power(p_retry_backoff, v_retry - 1)
+            * (0.5 + 0.5 * random()) / 1000.0
+        );
+    END LOOP;
+END;
+$fn$;
 
 CREATE OR REPLACE FUNCTION %s.ducklake_check_conflicts(
     p_our_changes TEXT,
@@ -137,6 +193,7 @@ DECLARE
     v_our_inline_flush BIGINT[];
     v_our_merge_adjacent BIGINT[];
     v_our_rewrite_delete BIGINT[];
+    v_our_created_in_schema_ids BIGINT[];
     -- Sets for other changes
     v_other_dropped_tables BIGINT[];
     v_other_dropped_views BIGINT[];
@@ -155,6 +212,7 @@ DECLARE
     v_other_inline_flush BIGINT[];
     v_other_merge_adjacent BIGINT[];
     v_other_rewrite_delete BIGINT[];
+    v_other_created_in_schema_ids BIGINT[];
     v_val BIGINT;
     v_txt TEXT;
 BEGIN
@@ -176,6 +234,7 @@ BEGIN
     v_our_inline_flush := ARRAY[]::BIGINT[];
     v_our_merge_adjacent := ARRAY[]::BIGINT[];
     v_our_rewrite_delete := ARRAY[]::BIGINT[];
+    v_our_created_in_schema_ids := ARRAY[]::BIGINT[];
     v_other_dropped_tables := ARRAY[]::BIGINT[];
     v_other_dropped_views := ARRAY[]::BIGINT[];
     v_other_dropped_schemas := ARRAY[]::BIGINT[];
@@ -193,6 +252,7 @@ BEGIN
     v_other_inline_flush := ARRAY[]::BIGINT[];
     v_other_merge_adjacent := ARRAY[]::BIGINT[];
     v_other_rewrite_delete := ARRAY[]::BIGINT[];
+    v_other_created_in_schema_ids := ARRAY[]::BIGINT[];
 
     -- Parse our changes
     IF p_our_changes IS NOT NULL AND p_our_changes != '' THEN
@@ -218,6 +278,7 @@ BEGIN
                 WHEN 'inline_flush' THEN v_our_inline_flush := v_our_inline_flush || v_our_value::BIGINT;
                 WHEN 'merge_adjacent' THEN v_our_merge_adjacent := v_our_merge_adjacent || v_our_value::BIGINT;
                 WHEN 'rewrite_delete' THEN v_our_rewrite_delete := v_our_rewrite_delete || v_our_value::BIGINT;
+                WHEN 'created_in_schema_id' THEN v_our_created_in_schema_ids := v_our_created_in_schema_ids || v_our_value::BIGINT;
                 ELSE NULL; -- ignore unknown change types
             END CASE;
         END LOOP;
@@ -247,6 +308,7 @@ BEGIN
                 WHEN 'inline_flush' THEN v_other_inline_flush := v_other_inline_flush || v_other_value::BIGINT;
                 WHEN 'merge_adjacent' THEN v_other_merge_adjacent := v_other_merge_adjacent || v_other_value::BIGINT;
                 WHEN 'rewrite_delete' THEN v_other_rewrite_delete := v_other_rewrite_delete || v_other_value::BIGINT;
+                WHEN 'created_in_schema_id' THEN v_other_created_in_schema_ids := v_other_created_in_schema_ids || v_other_value::BIGINT;
                 ELSE NULL; -- ignore unknown change types
             END CASE;
         END LOOP;
@@ -282,6 +344,17 @@ BEGIN
     FOREACH v_val IN ARRAY v_our_dropped_schemas LOOP
         IF v_val = ANY(v_other_dropped_schemas) THEN
             RAISE EXCEPTION 'Transaction conflict - attempting to drop schema with index "%%" - but another transaction has dropped it already', v_val;
+        END IF;
+        -- Check: dropping a schema where another tx created an entry
+        IF v_val = ANY(v_other_created_in_schema_ids) THEN
+            RAISE EXCEPTION 'Transaction conflict - attempting to drop schema with index "%%" - but another transaction has created an entry in this schema', v_val;
+        END IF;
+    END LOOP;
+
+    -- Check conflicts: creating entry in a dropped schema
+    FOREACH v_val IN ARRAY v_our_created_in_schema_ids LOOP
+        IF v_val = ANY(v_other_dropped_schemas) THEN
+            RAISE EXCEPTION 'Transaction conflict - attempting to create entry in schema with index "%%" - but another transaction has dropped this schema', v_val;
         END IF;
     END LOOP;
 
@@ -421,7 +494,7 @@ BEGIN
 END;
 $fn$ LANGUAGE plpgsql;
 
-)", schema, schema, schema, schema, schema, schema);
+)", schema, schema, schema, schema, schema, schema, schema, schema, schema, schema, schema);
 }
 
 void PostgresMetadataManager::InstallStoredProcedures() {

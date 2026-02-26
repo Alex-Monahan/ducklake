@@ -189,7 +189,8 @@ private:
 	void FlushChangesViaStoredProc();
 	void FlushSettingChanges();
 	string CommitChanges(DuckLakeCommitState &commit_state, TransactionChangeInformation &transaction_changes,
-	                     optional_ptr<vector<DuckLakeGlobalStatsInfo>> stats);
+	                     optional_ptr<vector<DuckLakeGlobalStatsInfo>> stats,
+	                     bool skip_existing_table_stats = false);
 	void CommitCompaction(DuckLakeSnapshot &commit_snapshot, TransactionChangeInformation &transaction_changes);
 	void FlushDrop(DuckLakeSnapshot commit_snapshot, const string &metadata_table_name, const string &id_name,
 	               unordered_set<idx_t> &dropped_entries);
@@ -204,7 +205,8 @@ private:
 	DuckLakeFileInfo GetNewDataFile(DuckLakeDataFile &file, DuckLakeSnapshot &commit_snapshot, TableIndex table_id,
 	                                optional_idx row_id_start);
 	NewDataInfo GetNewDataFiles(string &batch_query, DuckLakeCommitState &commit_state,
-	                            optional_ptr<vector<DuckLakeGlobalStatsInfo>> stats);
+	                            optional_ptr<vector<DuckLakeGlobalStatsInfo>> stats,
+	                            bool skip_existing_table_stats = false);
 	vector<DuckLakeDeleteFileInfo>
 	GetNewDeleteFiles(const DuckLakeCommitState &commit_state,
 	                  vector<DuckLakeOverwrittenDeleteFile> &overwritten_delete_files) const;

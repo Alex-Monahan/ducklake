@@ -36,6 +36,7 @@ struct SnapshotChangeInformation {
 	set<TableIndex> tables_inserted_inlined;
 	set<TableIndex> tables_deleted_inlined;
 	set<TableIndex> tables_flushed_inlined;
+	set<SchemaIndex> created_in_schema_ids;
 	static SnapshotChangeInformation ParseChangesMade(const string &changes_made);
 };
 
