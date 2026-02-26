@@ -152,33 +152,21 @@ void PostgresMetadataManager::SetStoredProcedureMode(idx_t catalog_base, idx_t f
 	file_id_base = file_base;
 }
 
-void PostgresMetadataManager::EnsureStoredProceduresExist() {
-	if (procedures_created) {
-		return;
-	}
+void PostgresMetadataManager::InitializeDuckLake(bool has_explicit_schema, DuckLakeEncryption encryption) {
+	DuckLakeMetadataManager::InitializeDuckLake(has_explicit_schema, encryption);
+	CreateStoredProcedures();
+}
+
+void PostgresMetadataManager::MigrateV03(bool allow_failures) {
+	DuckLakeMetadataManager::MigrateV03(allow_failures);
+	CreateStoredProcedures();
+}
+
+void PostgresMetadataManager::CreateStoredProcedures() {
 	auto &connection = transaction.GetConnection();
 	auto &ducklake_catalog = transaction.GetCatalog();
 	auto catalog_literal = DuckLakeUtil::SQLLiteralToString(ducklake_catalog.MetadataDatabaseName());
 	auto schema_identifier = DuckLakeUtil::SQLIdentifierToString(ducklake_catalog.MetadataSchemaName());
-	auto raw_schema_name = ducklake_catalog.MetadataSchemaName();
-	auto escaped_schema = StringUtil::Replace(raw_schema_name, "'", "''");
-
-	// Check if the stored procedures already exist in Postgres (from a previous commit).
-	// This avoids "tuple concurrently updated" errors when multiple sessions try to
-	// CREATE OR REPLACE the same functions simultaneously.
-	auto check_result = connection.Query(StringUtil::Format(
-	    "SELECT * FROM postgres_query(%s, 'SELECT 1 FROM pg_proc p "
-	    "JOIN pg_namespace n ON p.pronamespace = n.oid "
-	    "WHERE p.proname = ''ducklake_try_commit'' AND n.nspname = ''%s''')",
-	    catalog_literal, escaped_schema));
-	if (!check_result->HasError()) {
-		auto chunk = check_result->Fetch();
-		if (chunk && chunk->size() > 0) {
-			// Procedures already exist, no need to create them
-			procedures_created = true;
-			return;
-		}
-	}
 
 	// Use {PROC_SCHEMA} as placeholder, then replace with actual schema
 	string proc_sql = R"(
@@ -647,11 +635,6 @@ $fn$;
 	if (result->HasError()) {
 		result->GetErrorObject().Throw("Failed to create DuckLake stored procedures: ");
 	}
-	procedures_created = true;
-}
-
-void PostgresMetadataManager::ResetProceduresCreated() {
-	procedures_created = false;
 }
 
 unique_ptr<QueryResult> PostgresMetadataManager::ExecuteStoredProcCommit(

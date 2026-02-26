@@ -1935,9 +1935,6 @@ void DuckLakeTransaction::FlushChangesStoredProc() {
 	// (another transaction committed first), we rollback, start a new transaction, and retry.
 	for (idx_t i = 0; i < max_retry_count + 1; i++) {
 		try {
-			// Ensure stored procedures exist in Postgres
-			postgres_manager.EnsureStoredProceduresExist();
-
 			// Execute the stored function (single attempt, no internal retry)
 			auto res = postgres_manager.ExecuteStoredProcCommit(
 			    transaction_snapshot, batch_queries, schema_changed,
@@ -2002,8 +1999,6 @@ void DuckLakeTransaction::FlushChangesStoredProc() {
 			// Start a fresh transaction for the retry (so the stored function sees latest committed data)
 			connection->BeginTransaction();
 			snapshot.reset();
-			// Functions may have been rolled back, need to recreate on next attempt
-			postgres_manager.ResetProceduresCreated();
 		}
 	}
 }

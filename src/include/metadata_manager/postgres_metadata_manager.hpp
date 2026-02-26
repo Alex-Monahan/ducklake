@@ -36,17 +36,18 @@ public:
 	//! Inlined table name override for stored procedure placeholder support
 	string GetInlinedTableName(const DuckLakeTableInfo &table, const DuckLakeSnapshot &snapshot) override;
 
+	//! Initialize a new DuckLake - also creates stored procedures
+	void InitializeDuckLake(bool has_explicit_schema, DuckLakeEncryption encryption) override;
+	//! Migrate to v0.4 - also creates stored procedures
+	void MigrateV03(bool allow_failures = false) override;
+
 	//! Enable stored procedure mode with base IDs for offset calculation
 	void SetStoredProcedureMode(idx_t catalog_base, idx_t file_base);
-	//! Ensure stored procedures exist in the Postgres database
-	void EnsureStoredProceduresExist();
 	//! Execute commit via stored procedure (single attempt, no internal retry)
 	unique_ptr<QueryResult> ExecuteStoredProcCommit(
 	    DuckLakeSnapshot snapshot, string &batch_sql,
 	    bool schema_changed, idx_t txn_start_snapshot,
 	    const string &our_changes, idx_t delta_catalog, idx_t delta_file);
-	//! Reset the procedures_created flag (needed after transaction rollback)
-	void ResetProceduresCreated();
 
 protected:
 	string GetLatestSnapshotQuery() const override;
@@ -54,14 +55,15 @@ protected:
 private:
 	unique_ptr<QueryResult> ExecuteQuery(DuckLakeSnapshot snapshot, string &query, string command);
 
+	//! Ensure stored procedures exist in the Postgres database
+	void CreateStoredProcedures();
+
 	//! Whether stored procedure mode is active
 	bool use_stored_procedure = false;
 	//! Base catalog ID for offset calculation (snapshot.next_catalog_id at transaction start)
 	idx_t catalog_id_base = 0;
 	//! Base file ID for offset calculation (snapshot.next_file_id at transaction start)
 	idx_t file_id_base = 0;
-	//! Whether stored procedures have been created in this session
-	bool procedures_created = false;
 };
 
 } // namespace duckdb
