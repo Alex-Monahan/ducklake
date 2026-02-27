@@ -108,6 +108,10 @@ string DuckLakeMetadataManager::FormatFileId(idx_t id) {
 	return to_string(id);
 }
 
+string DuckLakeMetadataManager::FormatSchemaVersion(const DuckLakeSnapshot &snapshot) {
+	return to_string(snapshot.schema_version);
+}
+
 FileSystem &DuckLakeMetadataManager::GetFileSystem() {
 	return FileSystem::GetFileSystem(transaction.GetCatalog().GetDatabase());
 }
@@ -2119,9 +2123,8 @@ string DuckLakeMetadataManager::GetInlinedTableQueries(DuckLakeSnapshot commit_s
 	if (!inlined_tables.empty()) {
 		inlined_tables += ", ";
 	}
-	auto schema_version = commit_snapshot.schema_version;
 	string inlined_table_name = GetInlinedTableName(table, commit_snapshot);
-	inlined_tables += StringUtil::Format("(%s, %s, %d)", FormatCatalogId(table.id.index), SQLString(inlined_table_name), schema_version);
+	inlined_tables += StringUtil::Format("(%s, %s, %s)", FormatCatalogId(table.id.index), SQLString(inlined_table_name), FormatSchemaVersion(commit_snapshot));
 	if (!inlined_table_queries.empty()) {
 		inlined_table_queries += "\n";
 	}
@@ -2397,8 +2400,16 @@ string DuckLakeMetadataManager::WriteNewInlinedFileDeletes(DuckLakeSnapshot &com
 		return batch_queries;
 	}
 	for (auto &entry : new_deletes) {
-		// Get or create the inlined deletion table (handles caching internally)
-		auto table_name = GetInlinedDeletionTableName(entry.table_id, commit_snapshot, true);
+		// Deterministic table name for inlined file deletions
+		string table_name = StringUtil::Format("ducklake_inlined_delete_%d", entry.table_id.index);
+
+		// Include CREATE TABLE IF NOT EXISTS in the batch SQL so it's atomic with the commit
+		// and works correctly with the stored procedure retry path
+		// (create if not exists is also ~free performance wise when in a batch)
+		batch_queries += StringUtil::Format(
+		    "CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.%s(file_id BIGINT, row_id BIGINT, begin_snapshot BIGINT);\n",
+		    table_name);
+		
 
 		// Build the values for the deletions
 		string values;
@@ -4073,8 +4084,8 @@ string DuckLakeMetadataManager::InsertNewSchema(const DuckLakeSnapshot &snapshot
 	}
 	string result;
 	for (auto &table_id : table_ids) {
-		result += StringUtil::Format(R"(INSERT INTO {METADATA_CATALOG}.ducklake_schema_versions VALUES (%d,%d,%d);)",
-		                             snapshot.snapshot_id, snapshot.schema_version, table_id.index);
+		result += StringUtil::Format(R"(INSERT INTO {METADATA_CATALOG}.ducklake_schema_versions VALUES ({SNAPSHOT_ID},{SCHEMA_VERSION},%d);)",
+		                             table_id.index);
 	}
 	return result;
 }

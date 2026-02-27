@@ -1813,20 +1813,21 @@ void DuckLakeTransaction::FlushChangesStoredProc() {
 	// Build the commit snapshot (same as the regular path)
 	DuckLakeSnapshot commit_snapshot = transaction_snapshot;
 	commit_snapshot.snapshot_id++;
-	bool schema_changed = SchemaChangesMade();
-	if (schema_changed) {
+	if (SchemaChangesMade()) {
 		commit_snapshot.schema_version++;
 	}
 
 	// Build the batch SQL with placeholders
+	// CommitChanges may further increment commit_snapshot.schema_version (e.g., for new inlined tables)
 	DuckLakeCommitState commit_state(commit_snapshot);
 	string batch_queries = metadata_manager->InsertSnapshot();
 	batch_queries += CommitChanges(commit_state, transaction_changes, nullptr);
 	batch_queries += WriteSnapshotChanges(commit_state, transaction_changes);
 
-	// Compute deltas (how many catalog/file IDs were allocated)
+	// Compute deltas (how many catalog/file IDs and schema versions were allocated)
 	idx_t delta_catalog = commit_snapshot.next_catalog_id - transaction_snapshot.next_catalog_id;
 	idx_t delta_file = commit_snapshot.next_file_id - transaction_snapshot.next_file_id;
+	idx_t schema_delta = commit_snapshot.schema_version - transaction_snapshot.schema_version;
 
 	// Extract the changes_made string from the batch SQL
 	// WriteSnapshotChanges already embedded it in the INSERT statement, but we also need it
@@ -1937,7 +1938,7 @@ void DuckLakeTransaction::FlushChangesStoredProc() {
 		try {
 			// Execute the stored function (single attempt, no internal retry)
 			auto res = postgres_manager.ExecuteStoredProcCommit(
-			    transaction_snapshot, batch_queries, schema_changed,
+			    transaction_snapshot, batch_queries, schema_delta,
 			    transaction_snapshot.snapshot_id, change_info.changes_made,
 			    delta_catalog, delta_file);
 
@@ -2024,21 +2025,8 @@ void DuckLakeTransaction::FlushChanges() {
 	}
 
 	// Check if we can use the stored procedure path:
-	// 1. Must have stored procedures available (Postgres with PL/pgSQL)
-	// 2. Must have no inline data insert/delete operations
-	bool can_use_stored_proc = ducklake_catalog.UseStoredProcedures();
-	if (can_use_stored_proc) {
-		for (auto &entry : table_data_changes) {
-			if (entry.second.new_inlined_data ||
-			    !entry.second.new_inlined_data_deletes.empty() ||
-			    entry.second.new_inlined_file_deletes) {
-				can_use_stored_proc = false;
-				break;
-			}
-		}
-	}
-
-	if (can_use_stored_proc) {
+	// Must have stored procedures available (Postgres with PL/pgSQL)
+	if (ducklake_catalog.UseStoredProcedures()) {
 		FlushChangesStoredProc();
 		return;
 	}

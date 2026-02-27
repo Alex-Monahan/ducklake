@@ -35,6 +35,8 @@ public:
 
 	//! Inlined table name override for stored procedure placeholder support
 	string GetInlinedTableName(const DuckLakeTableInfo &table, const DuckLakeSnapshot &snapshot) override;
+	//! Schema version formatting override for stored procedure placeholder support
+	string FormatSchemaVersion(const DuckLakeSnapshot &snapshot) override;
 
 	//! Initialize a new DuckLake - conditionally creates stored procedures
 	void InitializeDuckLake(bool has_explicit_schema, DuckLakeEncryption encryption) override;
@@ -49,7 +51,7 @@ public:
 	//! Execute commit via stored procedure (single attempt, no internal retry)
 	unique_ptr<QueryResult> ExecuteStoredProcCommit(
 	    DuckLakeSnapshot snapshot, string &batch_sql,
-	    bool schema_changed, idx_t txn_start_snapshot,
+	    idx_t schema_delta, idx_t txn_start_snapshot,
 	    const string &our_changes, idx_t delta_catalog, idx_t delta_file);
 
 protected:

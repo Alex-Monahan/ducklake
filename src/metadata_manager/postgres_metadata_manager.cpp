@@ -146,6 +146,13 @@ string PostgresMetadataManager::GetInlinedTableName(const DuckLakeTableInfo &tab
 	return StringUtil::Format("ducklake_inlined_data_%s_%d", FormatCatalogId(table.id.index), snapshot.schema_version);
 }
 
+string PostgresMetadataManager::FormatSchemaVersion(const DuckLakeSnapshot &snapshot) {
+	if (use_stored_procedure) {
+		return "{SCHEMA_VERSION}";
+	}
+	return to_string(snapshot.schema_version);
+}
+
 void PostgresMetadataManager::SetStoredProcedureMode(idx_t catalog_base, idx_t file_base) {
 	use_stored_procedure = true;
 	catalog_id_base = catalog_base;
@@ -582,7 +589,7 @@ $fn$;
 CREATE OR REPLACE FUNCTION {PROC_SCHEMA}.ducklake_try_commit(
     p_schema TEXT,
     p_batch_sql TEXT,
-    p_schema_changed BOOLEAN,
+    p_schema_delta BIGINT,
     p_txn_start_snapshot BIGINT,
     p_our_changes TEXT,
     p_delta_catalog BIGINT,
@@ -616,7 +623,7 @@ BEGIN
 
     -- Compute new values
     v_new_sid := v_latest_sid + 1;
-    v_new_sv := v_latest_sv + (CASE WHEN p_schema_changed THEN 1 ELSE 0 END);
+    v_new_sv := v_latest_sv + p_schema_delta;
     v_catalog_base := v_latest_nci;
     v_file_base := v_latest_nfi;
     v_next_catalog_id := v_latest_nci + p_delta_catalog;
@@ -636,7 +643,7 @@ $fn$;
 CREATE OR REPLACE FUNCTION {PROC_SCHEMA}.ducklake_commit_with_retry(
     p_schema TEXT,
     p_batch_sql TEXT,
-    p_schema_changed BOOLEAN,
+    p_schema_delta BIGINT,
     p_txn_start_snapshot BIGINT,
     p_our_changes TEXT,
     p_delta_catalog BIGINT,
@@ -654,7 +661,7 @@ BEGIN
     FOR v_attempt IN 1..p_max_retry LOOP
         BEGIN
             SELECT * INTO v_result
-            FROM {PROC_SCHEMA}.ducklake_try_commit(p_schema, p_batch_sql, p_schema_changed,
+            FROM {PROC_SCHEMA}.ducklake_try_commit(p_schema, p_batch_sql, p_schema_delta,
                 p_txn_start_snapshot, p_our_changes, p_delta_catalog, p_delta_file);
             result_snapshot_id := v_result.new_snapshot_id;
             result_schema_version := v_result.new_schema_version;
@@ -689,7 +696,7 @@ $fn$;
 
 unique_ptr<QueryResult> PostgresMetadataManager::ExecuteStoredProcCommit(
     DuckLakeSnapshot snapshot, string &batch_sql,
-    bool schema_changed, idx_t txn_start_snapshot,
+    idx_t schema_delta, idx_t txn_start_snapshot,
     const string &our_changes, idx_t delta_catalog, idx_t delta_file) {
 
 	auto &commit_info = transaction.GetCommitInfo();
@@ -727,7 +734,7 @@ unique_ptr<QueryResult> PostgresMetadataManager::ExecuteStoredProcCommit(
 	    "SELECT * FROM %s.ducklake_try_commit("
 	    "'%s', "     // p_schema (raw, unquoted - %I in PL/pgSQL will quote it)
 	    "'%s', "     // p_batch_sql
-	    "%s, "       // p_schema_changed
+	    "%llu, "     // p_schema_delta
 	    "%llu, "     // p_txn_start_snapshot
 	    "'%s', "     // p_our_changes
 	    "%llu, "     // p_delta_catalog
@@ -736,7 +743,7 @@ unique_ptr<QueryResult> PostgresMetadataManager::ExecuteStoredProcCommit(
 	    schema_identifier_escaped,
 	    escaped_raw_schema,
 	    escaped_batch_sql,
-	    schema_changed ? "true" : "false",
+	    schema_delta,
 	    txn_start_snapshot,
 	    escaped_our_changes,
 	    delta_catalog,

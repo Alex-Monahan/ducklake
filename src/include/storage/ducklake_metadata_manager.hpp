@@ -184,6 +184,8 @@ public:
 	virtual string FormatCatalogId(idx_t id);
 	//! Format a file ID for SQL generation - can be overridden for stored procedure placeholder support
 	virtual string FormatFileId(idx_t id);
+	//! Format a schema version for SQL generation - can be overridden for stored procedure placeholder support
+	virtual string FormatSchemaVersion(const DuckLakeSnapshot &snapshot);
 	virtual string GetInlinedTableName(const DuckLakeTableInfo &table, const DuckLakeSnapshot &snapshot);
 	virtual string DropDataFiles(const set<DataFileIndex> &dropped_files);
 	virtual string DropDeleteFiles(const set<DataFileIndex> &dropped_files);
