@@ -53,6 +53,17 @@ static void HandleDuckLakeOption(DuckLakeOptions &options, const string &option,
 		options.automatic_migration = BooleanValue::Get(value.DefaultCastAs(LogicalType::BOOLEAN));
 	} else if (lcase == "busy_timeout") {
 		options.busy_timeout = UBigIntValue::Get(value.DefaultCastAs(LogicalType::UBIGINT));
+	} else if (lcase == "use_stored_procedures") {
+		auto val = StringUtil::Lower(value.ToString());
+		if (val == "true") {
+			options.use_stored_procedures = StoredProceduresSetting::ENABLED;
+		} else if (val == "false") {
+			options.use_stored_procedures = StoredProceduresSetting::DISABLED;
+		} else if (val == "auto") {
+			options.use_stored_procedures = StoredProceduresSetting::AUTO;
+		} else {
+			throw InvalidInputException("use_stored_procedures must be 'true', 'false', or 'auto'");
+		}
 	} else {
 		throw NotImplementedException("Unsupported option %s for DuckLake", option);
 	}

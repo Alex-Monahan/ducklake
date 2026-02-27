@@ -152,14 +152,64 @@ void PostgresMetadataManager::SetStoredProcedureMode(idx_t catalog_base, idx_t f
 	file_id_base = file_base;
 }
 
+bool PostgresMetadataManager::TryCreateStoredProcedures() {
+	auto &connection = transaction.GetConnection();
+	auto &ducklake_catalog = transaction.GetCatalog();
+	auto catalog_literal = DuckLakeUtil::SQLLiteralToString(ducklake_catalog.MetadataDatabaseName());
+
+	// Pre-check: is PL/pgSQL available? This avoids aborting the Postgres transaction.
+	auto check = connection.Query(StringUtil::Format(
+	    "SELECT * FROM postgres_query(%s, 'SELECT 1 FROM pg_language WHERE lanname = ''plpgsql''')",
+	    catalog_literal));
+	if (check->HasError()) {
+		return false;
+	}
+	auto chunk = check->Fetch();
+	if (!chunk || chunk->size() == 0) {
+		return false;
+	}
+
+	// PL/pgSQL available — try to create (with safety catch)
+	try {
+		CreateStoredProcedures();
+		return true;
+	} catch (std::exception &) {
+		return false;
+	}
+}
+
+void PostgresMetadataManager::ResolveStoredProcedures() {
+	auto &ducklake_catalog = transaction.GetCatalog();
+	auto sp_setting = ducklake_catalog.StoredProceduresOption();
+
+	if (sp_setting == StoredProceduresSetting::DISABLED) {
+		ducklake_catalog.SetStoredProceduresAvailable(false);
+	} else if (sp_setting == StoredProceduresSetting::ENABLED) {
+		// Explicitly enabled — throw on failure
+		CreateStoredProcedures();
+		ducklake_catalog.SetStoredProceduresAvailable(true);
+	} else {
+		// Auto — probe and try
+		bool ok = TryCreateStoredProcedures();
+		ducklake_catalog.SetStoredProceduresAvailable(ok);
+	}
+
+	// Persist the resolved value in ducklake_metadata
+	DuckLakeSnapshot empty_snapshot;
+	string insert = StringUtil::Format(
+	    "INSERT INTO {METADATA_CATALOG}.ducklake_metadata (key, value) VALUES ('use_stored_procedures', '%s')",
+	    ducklake_catalog.UseStoredProcedures() ? "true" : "false");
+	Execute(empty_snapshot, insert);
+}
+
 void PostgresMetadataManager::InitializeDuckLake(bool has_explicit_schema, DuckLakeEncryption encryption) {
 	DuckLakeMetadataManager::InitializeDuckLake(has_explicit_schema, encryption);
-	CreateStoredProcedures();
+	ResolveStoredProcedures();
 }
 
 void PostgresMetadataManager::MigrateV03(bool allow_failures) {
 	DuckLakeMetadataManager::MigrateV03(allow_failures);
-	CreateStoredProcedures();
+	ResolveStoredProcedures();
 }
 
 void PostgresMetadataManager::CreateStoredProcedures() {

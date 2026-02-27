@@ -2024,10 +2024,9 @@ void DuckLakeTransaction::FlushChanges() {
 	}
 
 	// Check if we can use the stored procedure path:
-	// 1. Must be Postgres metadata catalog
+	// 1. Must have stored procedures available (Postgres with PL/pgSQL)
 	// 2. Must have no inline data insert/delete operations
-	bool can_use_stored_proc = (ducklake_catalog.MetadataType() == "postgres" ||
-	                            ducklake_catalog.MetadataType() == "postgres_scanner");
+	bool can_use_stored_proc = ducklake_catalog.UseStoredProcedures();
 	if (can_use_stored_proc) {
 		for (auto &entry : table_data_changes) {
 			if (entry.second.new_inlined_data ||

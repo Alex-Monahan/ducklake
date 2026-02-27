@@ -121,6 +121,18 @@ public:
 		return options.encryption;
 	}
 
+	bool UseStoredProcedures() const {
+		return stored_procedures_available;
+	}
+
+	StoredProceduresSetting StoredProceduresOption() const {
+		return options.use_stored_procedures;
+	}
+
+	void SetStoredProceduresAvailable(bool available) {
+		stored_procedures_available = available;
+	}
+
 	bool IsEncrypted() const override {
 		return Encryption() == DuckLakeEncryption::ENCRYPTED;
 	}
@@ -198,6 +210,8 @@ private:
 	atomic<idx_t> last_uncommitted_catalog_version;
 	//! The metadata server type
 	string metadata_type;
+	//! Whether stored procedures are available for atomic commits (Postgres only)
+	bool stored_procedures_available = false;
 	//! Whether or not the catalog is initialized
 	bool initialized = false;
 	//! The id of the last committed snapshot, set at FlushChanges on a successful commit

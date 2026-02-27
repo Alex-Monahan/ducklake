@@ -36,10 +36,13 @@ public:
 	//! Inlined table name override for stored procedure placeholder support
 	string GetInlinedTableName(const DuckLakeTableInfo &table, const DuckLakeSnapshot &snapshot) override;
 
-	//! Initialize a new DuckLake - also creates stored procedures
+	//! Initialize a new DuckLake - conditionally creates stored procedures
 	void InitializeDuckLake(bool has_explicit_schema, DuckLakeEncryption encryption) override;
-	//! Migrate to v0.4 - also creates stored procedures
+	//! Migrate to v0.4 - conditionally creates stored procedures
 	void MigrateV03(bool allow_failures = false) override;
+
+	//! Try to create stored procedures. Returns true on success, false if PL/pgSQL unavailable.
+	bool TryCreateStoredProcedures();
 
 	//! Enable stored procedure mode with base IDs for offset calculation
 	void SetStoredProcedureMode(idx_t catalog_base, idx_t file_base);
@@ -55,6 +58,8 @@ protected:
 private:
 	unique_ptr<QueryResult> ExecuteQuery(DuckLakeSnapshot snapshot, string &query, string command);
 
+	//! Resolve stored procedure availability based on the ATTACH setting, and persist the result
+	void ResolveStoredProcedures();
 	//! Ensure stored procedures exist in the Postgres database
 	void CreateStoredProcedures();
 

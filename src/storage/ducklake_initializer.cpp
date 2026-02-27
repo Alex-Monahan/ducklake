@@ -205,6 +205,25 @@ void DuckLakeInitializer::LoadExistingDuckLake(DuckLakeTransaction &transaction)
 	for (auto &entry : metadata.table_settings) {
 		options.table_options[entry.table_id][entry.tag.key] = entry.tag.value;
 	}
+
+	// Resolve stored procedure availability for Postgres backends
+	bool is_postgres = (catalog.MetadataType() == "postgres" || catalog.MetadataType() == "postgres_scanner");
+	if (is_postgres) {
+		auto sp_setting = options.use_stored_procedures;
+		if (sp_setting == StoredProceduresSetting::ENABLED) {
+			catalog.SetStoredProceduresAvailable(true);
+		} else if (sp_setting == StoredProceduresSetting::DISABLED) {
+			catalog.SetStoredProceduresAvailable(false);
+		} else {
+			// Auto — use persisted value from metadata, default to true for backward compatibility
+			auto it = options.config_options.find("use_stored_procedures");
+			if (it != options.config_options.end()) {
+				catalog.SetStoredProceduresAvailable(it->second == "true");
+			} else {
+				catalog.SetStoredProceduresAvailable(true);
+			}
+		}
+	}
 }
 
 } // namespace duckdb
