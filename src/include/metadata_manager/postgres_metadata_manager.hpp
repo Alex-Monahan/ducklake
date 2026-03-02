@@ -32,6 +32,11 @@ public:
 	//! ID formatting overrides for stored procedure placeholder support
 	string FormatCatalogId(idx_t id) override;
 	string FormatFileId(idx_t id) override;
+	//! Row ID formatting override for stored procedure placeholder support
+	string FormatRowId(TableIndex table_id, optional_idx row_id_start, optional_idx row_id_offset) override;
+
+	//! Override for delta-based stats in stored procedure mode
+	string UpdateGlobalTableStats(const DuckLakeGlobalStatsInfo &stats) override;
 
 	//! Inlined table name override for stored procedure placeholder support
 	string GetInlinedTableName(const DuckLakeTableInfo &table, const DuckLakeSnapshot &snapshot) override;
@@ -49,10 +54,9 @@ public:
 	//! Enable stored procedure mode with base IDs for offset calculation
 	void SetStoredProcedureMode(idx_t catalog_base, idx_t file_base);
 	//! Execute commit via stored procedure (single attempt, no internal retry)
-	unique_ptr<QueryResult> ExecuteStoredProcCommit(
-	    DuckLakeSnapshot snapshot, string &batch_sql,
-	    idx_t schema_delta, idx_t txn_start_snapshot,
-	    const string &our_changes, idx_t delta_catalog, idx_t delta_file);
+	unique_ptr<QueryResult> ExecuteStoredProcCommit(DuckLakeSnapshot snapshot, string &batch_sql, idx_t schema_delta,
+	                                                idx_t txn_start_snapshot, const string &our_changes,
+	                                                idx_t delta_catalog, idx_t delta_file);
 
 protected:
 	string GetLatestSnapshotQuery() const override;

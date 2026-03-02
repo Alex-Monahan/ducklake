@@ -1384,8 +1384,14 @@ NewDataInfo DuckLakeTransaction::GetNewDataFiles(string &batch_query, DuckLakeCo
 			current_stats = ducklake_catalog.GetTableStats(*this, table_id);
 		}
 
+		bool is_sp_mode = ducklake_catalog.UseStoredProcedures();
 		if (current_stats) {
-			new_globals.stats = *current_stats;
+			if (!is_sp_mode) {
+				// Non-SP mode: start from current absolute stats
+				new_globals.stats = *current_stats;
+			}
+			// In SP mode: stats start from zero (deltas only), but mark as initialized
+			// so UpdateGlobalTableStats generates delta UPDATE instead of INSERT
 			new_globals.initialized = true;
 		}
 		auto &new_stats = new_globals.stats;
@@ -1396,6 +1402,13 @@ NewDataInfo DuckLakeTransaction::GetNewDataFiles(string &batch_query, DuckLakeCo
 			auto row_id_start =
 			    file.flush_row_id_start.IsValid() ? file.flush_row_id_start.GetIndex() : new_stats.next_row_id;
 			auto data_file = GetNewDataFile(file, commit_state.commit_snapshot, table_id, row_id_start);
+
+			// In SP mode, set row_id_offset for placeholder-based row IDs
+			// Flushed files have embedded row IDs and use absolute row_id_start (no offset)
+			if (is_sp_mode && !file.flush_row_id_start.IsValid()) {
+				data_file.row_id_offset = optional_idx(new_stats.next_row_id);
+			}
+
 			for (auto &del_file : file.delete_files) {
 				// this transaction-local file already has deletes - write them out
 				DuckLakeDeleteFile delete_file = del_file;
@@ -1426,6 +1439,11 @@ NewDataInfo DuckLakeTransaction::GetNewDataFiles(string &batch_query, DuckLakeCo
 			DuckLakeInlinedDataInfo new_inlined_data;
 			new_inlined_data.table_id = table_id;
 			new_inlined_data.row_id_start = new_stats.next_row_id;
+
+			// In SP mode, set row_id_offset for placeholder-based row IDs
+			if (is_sp_mode) {
+				new_inlined_data.row_id_offset = optional_idx(new_stats.next_row_id);
+			}
 
 			// merge column stats
 			for (auto &entry : inlined_data.column_stats) {
@@ -1912,6 +1930,26 @@ void DuckLakeTransaction::FlushChangesStoredProc() {
 		AddChangeInfo(commit_state, change_info, transaction_changes.tables_flushed_inlined, "inline_flush");
 		AddChangeInfo(commit_state, change_info, transaction_changes.tables_merge_adjacent, "merge_adjacent");
 		AddChangeInfo(commit_state, change_info, transaction_changes.tables_rewrite_delete, "rewrite_delete");
+
+		// Add file-level delete tracking for conflict detection
+		for (auto &entry : table_data_changes) {
+			for (auto &file_entry : entry.second.new_delete_files) {
+				for (auto &file : file_entry.second) {
+					if (!change_info.changes_made.empty()) {
+						change_info.changes_made += ",";
+					}
+					change_info.changes_made += "deleted_from_file:";
+					change_info.changes_made += to_string(file.data_file_id.index);
+				}
+			}
+		}
+		for (auto &file : dropped_files) {
+			if (!change_info.changes_made.empty()) {
+				change_info.changes_made += ",";
+			}
+			change_info.changes_made += "deleted_from_file:";
+			change_info.changes_made += to_string(file.second.index);
+		}
 	}
 
 	// Read retry settings
@@ -1937,10 +1975,9 @@ void DuckLakeTransaction::FlushChangesStoredProc() {
 	for (idx_t i = 0; i < max_retry_count + 1; i++) {
 		try {
 			// Execute the stored function (single attempt, no internal retry)
-			auto res = postgres_manager.ExecuteStoredProcCommit(
-			    transaction_snapshot, batch_queries, schema_delta,
-			    transaction_snapshot.snapshot_id, change_info.changes_made,
-			    delta_catalog, delta_file);
+			auto res = postgres_manager.ExecuteStoredProcCommit(transaction_snapshot, batch_queries, schema_delta,
+			                                                    transaction_snapshot.snapshot_id,
+			                                                    change_info.changes_made, delta_catalog, delta_file);
 
 			if (res->HasError()) {
 				res->GetErrorObject().Throw("Failed to flush changes into DuckLake via stored procedure: ");

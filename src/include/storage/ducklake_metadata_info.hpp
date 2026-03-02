@@ -153,6 +153,8 @@ struct DuckLakeFileInfo {
 	idx_t file_size_bytes;
 	optional_idx footer_size;
 	optional_idx row_id_start;
+	//! Offset from base next_row_id for stored procedure placeholder support
+	optional_idx row_id_offset;
 	optional_idx partition_id;
 	optional_idx begin_snapshot;
 	optional_idx max_partial_file_snapshot;
@@ -165,6 +167,8 @@ struct DuckLakeFileInfo {
 struct DuckLakeInlinedDataInfo {
 	TableIndex table_id;
 	idx_t row_id_start;
+	//! Offset from base next_row_id for stored procedure placeholder support
+	optional_idx row_id_offset;
 	optional_ptr<DuckLakeInlinedData> data;
 };
 

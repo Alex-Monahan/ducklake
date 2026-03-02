@@ -38,7 +38,8 @@ static constexpr const ducklake_option_array DUCKLAKE_OPTIONS = {
                       "'ducklake_rewrite_data_files', 'ducklake_delete_orphaned_files'"},
      {"encrypted", "Whether or not to encrypt Parquet files written to the data path"},
      {"per_thread_output", "Whether to create separate output files per thread during parallel insertion"},
-     {"use_stored_procedures", "Whether to use PL/pgSQL stored procedures for atomic commits (Postgres only, auto/true/false)"}}};
+     {"use_stored_procedures",
+      "Whether to use PL/pgSQL stored procedures for atomic commits (Postgres only, auto/true/false)"}}};
 
 struct DuckLakeOptionsData : public TableFunctionData {
 	explicit DuckLakeOptionsData(Catalog &catalog) : catalog(catalog) {

@@ -139,6 +139,14 @@ string PostgresMetadataManager::FormatFileId(idx_t id) {
 	return to_string(id);
 }
 
+string PostgresMetadataManager::FormatRowId(TableIndex table_id, optional_idx row_id_start,
+                                            optional_idx row_id_offset) {
+	if (use_stored_procedure && row_id_offset.IsValid()) {
+		return "{TABLE_ROW_ID:" + FormatCatalogId(table_id.index) + "} + " + to_string(row_id_offset.GetIndex());
+	}
+	return to_string(row_id_start.GetIndex());
+}
+
 string PostgresMetadataManager::GetInlinedTableName(const DuckLakeTableInfo &table, const DuckLakeSnapshot &snapshot) {
 	if (use_stored_procedure) {
 		return StringUtil::Format("ducklake_inlined_data_%s_{SCHEMA_VERSION}", FormatCatalogId(table.id.index));
@@ -159,6 +167,71 @@ void PostgresMetadataManager::SetStoredProcedureMode(idx_t catalog_base, idx_t f
 	file_id_base = file_base;
 }
 
+string PostgresMetadataManager::UpdateGlobalTableStats(const DuckLakeGlobalStatsInfo &stats) {
+	if (!use_stored_procedure || !stats.initialized) {
+		// Not in SP mode, or new table (no concurrency possible) - use base class absolute logic
+		return DuckLakeMetadataManager::UpdateGlobalTableStats(stats);
+	}
+
+	// SP mode with existing stats: generate delta-based SQL
+	// stats.record_count/next_row_id/table_size_bytes are DELTAS (not absolute values)
+	string batch_query;
+
+	// Delta-based update for table stats
+	batch_query += StringUtil::Format(
+	    "UPDATE {METADATA_CATALOG}.ducklake_table_stats SET record_count=record_count + %d, "
+	    "file_size_bytes=file_size_bytes + %d, next_row_id=next_row_id + %d WHERE table_id=%s;",
+	    stats.record_count, stats.table_size_bytes, stats.next_row_id, FormatCatalogId(stats.table_id.index));
+
+	// Merge-based update for column stats
+	if (!stats.column_stats.empty()) {
+		string column_stats_values;
+		for (auto &col_stats : stats.column_stats) {
+			if (!column_stats_values.empty()) {
+				column_stats_values += ",";
+			}
+			string contains_null;
+			if (col_stats.has_contains_null) {
+				contains_null = col_stats.contains_null ? "true" : "false";
+			} else {
+				contains_null = "NULL";
+			}
+			string contains_nan;
+			if (col_stats.has_contains_nan) {
+				contains_nan = col_stats.contains_nan ? "true" : "false";
+			} else {
+				contains_nan = "NULL";
+			}
+			string min_val = col_stats.has_min ? DuckLakeUtil::StatsToString(col_stats.min_val) : "NULL";
+			string max_val = col_stats.has_max ? DuckLakeUtil::StatsToString(col_stats.max_val) : "NULL";
+			string extra_stats_val = col_stats.has_extra_stats ? col_stats.extra_stats : "NULL";
+
+			column_stats_values += StringUtil::Format("(%s, %d, %s, %s, %s, %s, %s)",
+			                                          FormatCatalogId(stats.table_id.index), col_stats.column_id.index,
+			                                          contains_null, contains_nan, min_val, max_val, extra_stats_val);
+		}
+		batch_query += StringUtil::Format(R"(
+WITH new_values(tid, cid, new_contains_null, new_contains_nan, new_min, new_max, new_extra_stats) AS (
+VALUES %s
+)
+UPDATE {METADATA_CATALOG}.ducklake_table_column_stats
+SET contains_null=contains_null OR new_contains_null::boolean,
+    contains_nan=contains_nan OR new_contains_nan::boolean,
+    min_value=CASE WHEN min_value IS NULL THEN new_min
+                   WHEN new_min IS NULL THEN min_value
+                   WHEN new_min < min_value THEN new_min ELSE min_value END,
+    max_value=CASE WHEN max_value IS NULL THEN new_max
+                   WHEN new_max IS NULL THEN max_value
+                   WHEN new_max > max_value THEN new_max ELSE max_value END,
+    extra_stats=COALESCE(new_extra_stats, extra_stats)
+FROM new_values
+WHERE table_id=tid AND column_id=cid;
+)",
+		                                  column_stats_values);
+	}
+	return batch_query;
+}
+
 bool PostgresMetadataManager::TryCreateStoredProcedures() {
 	auto &connection = transaction.GetConnection();
 	auto &ducklake_catalog = transaction.GetCatalog();
@@ -166,8 +239,7 @@ bool PostgresMetadataManager::TryCreateStoredProcedures() {
 
 	// Pre-check: is PL/pgSQL available? This avoids aborting the Postgres transaction.
 	auto check = connection.Query(StringUtil::Format(
-	    "SELECT * FROM postgres_query(%s, 'SELECT 1 FROM pg_language WHERE lanname = ''plpgsql''')",
-	    catalog_literal));
+	    "SELECT * FROM postgres_query(%s, 'SELECT 1 FROM pg_language WHERE lanname = ''plpgsql''')", catalog_literal));
 	if (check->HasError()) {
 		return false;
 	}
@@ -439,22 +511,12 @@ BEGIN
                 RAISE EXCEPTION 'Transaction conflict - attempting to insert into table with index "%" - but another transaction has altered it', v_our_value;
             END IF;
 
-            -- EXTRA SAFETY: inserted_into_table overlap (conservative check for stats correctness)
-            IF v_our_type = 'inserted_into_table' AND v_other_type = 'inserted_into_table' AND v_our_value = v_other_value THEN
-                RAISE EXCEPTION 'Transaction conflict - attempting to insert into table with index "%" - but another transaction has inserted into it', v_our_value;
-            END IF;
-
             -- Inlined insert into dropped/altered table
             IF v_our_type = 'inlined_insert' AND v_other_type = 'dropped_table' AND v_our_value = v_other_value THEN
                 RAISE EXCEPTION 'Transaction conflict - attempting to insert into table with index "%" - but another transaction has dropped it', v_our_value;
             END IF;
             IF v_our_type = 'inlined_insert' AND v_other_type = 'altered_table' AND v_our_value = v_other_value THEN
                 RAISE EXCEPTION 'Transaction conflict - attempting to insert into table with index "%" - but another transaction has altered it', v_our_value;
-            END IF;
-
-            -- EXTRA SAFETY: inlined_insert overlap
-            IF v_our_type = 'inlined_insert' AND v_other_type = 'inlined_insert' AND v_our_value = v_other_value THEN
-                RAISE EXCEPTION 'Transaction conflict - attempting to insert into table with index "%" - but another transaction has inserted into it', v_our_value;
             END IF;
 
             -- Delete from dropped/altered/compacted table
@@ -470,11 +532,6 @@ BEGIN
             IF v_our_type = 'deleted_from_table' AND v_other_type = 'rewrite_delete' AND v_our_value = v_other_value THEN
                 RAISE EXCEPTION 'Transaction conflict - attempting to delete from table with index "%" - but another transaction has compacted it', v_our_value;
             END IF;
-            -- Conservative table-level check: both transactions deleted from the same table
-            IF v_our_type = 'deleted_from_table' AND v_other_type = 'deleted_from_table' AND v_our_value = v_other_value THEN
-                RAISE EXCEPTION 'Transaction conflict - attempting to delete from table with index "%" - but another transaction has deleted from it', v_our_value;
-            END IF;
-
             -- Inlined deletes
             IF v_our_type = 'inlined_delete' AND v_other_type = 'dropped_table' AND v_our_value = v_other_value THEN
                 RAISE EXCEPTION 'Transaction conflict - attempting to delete from table with index "%" - but another transaction has dropped it', v_our_value;
@@ -539,11 +596,37 @@ BEGIN
             END IF;
         END LOOP;
     END LOOP;
+
+    -- File-level delete conflict detection
+    DECLARE
+        v_our_deleted_files BIGINT[];
+        v_conflicting_file BIGINT;
+    BEGIN
+        SELECT ARRAY_AGG(change_value::BIGINT) INTO v_our_deleted_files
+        FROM {PROC_SCHEMA}.ducklake_parse_changes(p_our_changes)
+        WHERE change_type = 'deleted_from_file';
+
+        IF v_our_deleted_files IS NOT NULL AND array_length(v_our_deleted_files, 1) > 0 THEN
+            EXECUTE format(
+                'SELECT data_file_id FROM %I.ducklake_delete_file
+                 WHERE data_file_id = ANY($1) AND begin_snapshot > $2
+                 UNION ALL
+                 SELECT data_file_id FROM %I.ducklake_data_file
+                 WHERE data_file_id = ANY($1) AND end_snapshot IS NOT NULL AND end_snapshot > $2
+                 LIMIT 1', p_schema, p_schema
+            ) INTO v_conflicting_file USING v_our_deleted_files, p_txn_start_snapshot;
+
+            IF v_conflicting_file IS NOT NULL THEN
+                RAISE EXCEPTION 'Transaction conflict - attempting to delete from file "%" - but another transaction has deleted from it', v_conflicting_file;
+            END IF;
+        END IF;
+    END;
 END;
 $fn$;
 
 -- Replace placeholders in SQL
 CREATE OR REPLACE FUNCTION {PROC_SCHEMA}.ducklake_replace_placeholders(
+    p_schema TEXT,
     p_sql TEXT,
     p_snapshot_id BIGINT,
     p_schema_version BIGINT,
@@ -558,6 +641,8 @@ DECLARE
     result TEXT := p_sql;
     v_match TEXT[];
     v_offset BIGINT;
+    v_table_id BIGINT;
+    v_next_row_id BIGINT;
 BEGIN
     -- Replace simple placeholders
     result := replace(result, '{SNAPSHOT_ID}', p_snapshot_id::TEXT);
@@ -579,6 +664,16 @@ BEGIN
         v_offset := v_match[1]::BIGINT;
         result := replace(result, '{FILE_ID:' || v_offset || '}',
                          (p_file_base + v_offset)::TEXT);
+    END LOOP;
+
+    -- Replace TABLE_ROW_ID placeholders (resolve current next_row_id from ducklake_table_stats)
+    WHILE result ~ '\{TABLE_ROW_ID:\d+\}' LOOP
+        v_match := regexp_matches(result, '\{TABLE_ROW_ID:(\d+)\}');
+        v_table_id := v_match[1]::BIGINT;
+        EXECUTE format('SELECT COALESCE(next_row_id, 0) FROM %I.ducklake_table_stats WHERE table_id = $1', p_schema)
+            INTO v_next_row_id USING v_table_id;
+        IF v_next_row_id IS NULL THEN v_next_row_id := 0; END IF;
+        result := replace(result, '{TABLE_ROW_ID:' || v_table_id || '}', v_next_row_id::TEXT);
     END LOOP;
 
     RETURN result;
@@ -630,7 +725,7 @@ BEGIN
     v_next_file_id := v_latest_nfi + p_delta_file;
 
     -- Replace placeholders and execute
-    SELECT {PROC_SCHEMA}.ducklake_replace_placeholders(p_batch_sql, v_new_sid, v_new_sv, v_catalog_base, v_file_base, v_next_catalog_id, v_next_file_id)
+    SELECT {PROC_SCHEMA}.ducklake_replace_placeholders(p_schema, p_batch_sql, v_new_sid, v_new_sv, v_catalog_base, v_file_base, v_next_catalog_id, v_next_file_id)
         INTO v_sql;
 
     EXECUTE v_sql;
@@ -688,17 +783,17 @@ $fn$;
 )";
 
 	proc_sql = StringUtil::Replace(proc_sql, "{PROC_SCHEMA}", schema_identifier);
-	auto result = connection.Query(StringUtil::Format("CALL postgres_execute(%s, %s)", catalog_literal, SQLString(proc_sql)));
+	auto result =
+	    connection.Query(StringUtil::Format("CALL postgres_execute(%s, %s)", catalog_literal, SQLString(proc_sql)));
 	if (result->HasError()) {
 		result->GetErrorObject().Throw("Failed to create DuckLake stored procedures: ");
 	}
 }
 
-unique_ptr<QueryResult> PostgresMetadataManager::ExecuteStoredProcCommit(
-    DuckLakeSnapshot snapshot, string &batch_sql,
-    idx_t schema_delta, idx_t txn_start_snapshot,
-    const string &our_changes, idx_t delta_catalog, idx_t delta_file) {
-
+unique_ptr<QueryResult> PostgresMetadataManager::ExecuteStoredProcCommit(DuckLakeSnapshot snapshot, string &batch_sql,
+                                                                         idx_t schema_delta, idx_t txn_start_snapshot,
+                                                                         const string &our_changes, idx_t delta_catalog,
+                                                                         idx_t delta_file) {
 	auto &commit_info = transaction.GetCommitInfo();
 	auto &connection = transaction.GetConnection();
 	auto &ducklake_catalog = transaction.GetCatalog();
@@ -730,26 +825,20 @@ unique_ptr<QueryResult> PostgresMetadataManager::ExecuteStoredProcCommit(
 	auto escaped_raw_schema = StringUtil::Replace(raw_schema_name, "'", "''");
 
 	// Call ducklake_try_commit directly (single attempt, retry handled by C++)
-	string call_sql = StringUtil::Format(
-	    "SELECT * FROM %s.ducklake_try_commit("
-	    "'%s', "     // p_schema (raw, unquoted - %I in PL/pgSQL will quote it)
-	    "'%s', "     // p_batch_sql
-	    "%llu, "     // p_schema_delta
-	    "%llu, "     // p_txn_start_snapshot
-	    "'%s', "     // p_our_changes
-	    "%llu, "     // p_delta_catalog
-	    "%llu"       // p_delta_file
-	    ")",
-	    schema_identifier_escaped,
-	    escaped_raw_schema,
-	    escaped_batch_sql,
-	    schema_delta,
-	    txn_start_snapshot,
-	    escaped_our_changes,
-	    delta_catalog,
-	    delta_file);
+	string call_sql = StringUtil::Format("SELECT * FROM %s.ducklake_try_commit("
+	                                     "'%s', " // p_schema (raw, unquoted - %I in PL/pgSQL will quote it)
+	                                     "'%s', " // p_batch_sql
+	                                     "%llu, " // p_schema_delta
+	                                     "%llu, " // p_txn_start_snapshot
+	                                     "'%s', " // p_our_changes
+	                                     "%llu, " // p_delta_catalog
+	                                     "%llu"   // p_delta_file
+	                                     ")",
+	                                     schema_identifier_escaped, escaped_raw_schema, escaped_batch_sql, schema_delta,
+	                                     txn_start_snapshot, escaped_our_changes, delta_catalog, delta_file);
 
-	return connection.Query(StringUtil::Format("SELECT * FROM postgres_query(%s, %s)", catalog_literal, SQLString(call_sql)));
+	return connection.Query(
+	    StringUtil::Format("SELECT * FROM postgres_query(%s, %s)", catalog_literal, SQLString(call_sql)));
 }
 
 } // namespace duckdb

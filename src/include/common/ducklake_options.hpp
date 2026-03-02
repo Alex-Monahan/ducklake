@@ -20,11 +20,7 @@ namespace duckdb {
 
 using option_map_t = unordered_map<string, string>;
 
-enum class StoredProceduresSetting : uint8_t {
-	AUTO = 0,
-	ENABLED = 1,
-	DISABLED = 2
-};
+enum class StoredProceduresSetting : uint8_t { AUTO = 0, ENABLED = 1, DISABLED = 2 };
 
 struct DuckLakeOptions {
 	string metadata_database;
@@ -41,7 +37,8 @@ struct DuckLakeOptions {
 	option_map_t config_options;
 	map<SchemaIndex, option_map_t> schema_options;
 	map<TableIndex, option_map_t> table_options;
-	StoredProceduresSetting use_stored_procedures = StoredProceduresSetting::AUTO;
+	StoredProceduresSetting use_stored_procedures =
+	    StoredProceduresSetting::ENABLED; // TODO FIXME - SET THIS BACK TO AUTO
 	idx_t busy_timeout = 5000;
 };
 
