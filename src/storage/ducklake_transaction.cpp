@@ -1389,9 +1389,11 @@ NewDataInfo DuckLakeTransaction::GetNewDataFiles(string &batch_query, DuckLakeCo
 			if (!is_sp_mode) {
 				// Non-SP mode: start from current absolute stats
 				new_globals.stats = *current_stats;
+			} else {
+				// SP mode: copy column stats for exact pre-merging in C++,
+				// but keep table-level stats at zero (delta mode)
+				new_globals.stats.column_stats = current_stats->column_stats;
 			}
-			// In SP mode: stats start from zero (deltas only), but mark as initialized
-			// so UpdateGlobalTableStats generates delta UPDATE instead of INSERT
 			new_globals.initialized = true;
 		}
 		auto &new_stats = new_globals.stats;

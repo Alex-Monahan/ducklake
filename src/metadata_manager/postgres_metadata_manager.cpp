@@ -168,62 +168,71 @@ void PostgresMetadataManager::SetStoredProcedureMode(idx_t catalog_base, idx_t f
 }
 
 string PostgresMetadataManager::UpdateGlobalTableStats(const DuckLakeGlobalStatsInfo &stats) {
-	if (!use_stored_procedure || !stats.initialized) {
-		// Not in SP mode, or new table (no concurrency possible) - use base class absolute logic
+	if (!use_stored_procedure) {
 		return DuckLakeMetadataManager::UpdateGlobalTableStats(stats);
 	}
 
-	// SP mode with existing stats: generate delta-based SQL
-	// stats.record_count/next_row_id/table_size_bytes are DELTAS (not absolute values)
+	// SP mode: build column stats values (shared by both initialized and !initialized paths)
+	string column_stats_values;
+	for (auto &col_stats : stats.column_stats) {
+		if (!column_stats_values.empty()) {
+			column_stats_values += ",";
+		}
+		string contains_null;
+		if (col_stats.has_contains_null) {
+			contains_null = col_stats.contains_null ? "true" : "false";
+		} else {
+			contains_null = "NULL";
+		}
+		string contains_nan;
+		if (col_stats.has_contains_nan) {
+			contains_nan = col_stats.contains_nan ? "true" : "false";
+		} else {
+			contains_nan = "NULL";
+		}
+		string min_val = col_stats.has_min ? DuckLakeUtil::StatsToString(col_stats.min_val) : "NULL";
+		string max_val = col_stats.has_max ? DuckLakeUtil::StatsToString(col_stats.max_val) : "NULL";
+		string extra_stats_val = col_stats.has_extra_stats ? col_stats.extra_stats : "NULL";
+
+		column_stats_values += StringUtil::Format("(%s, %d, %s, %s, %s, %s, %s)", FormatCatalogId(stats.table_id.index),
+		                                          col_stats.column_id.index, contains_null, contains_nan, min_val,
+		                                          max_val, extra_stats_val);
+	}
+
 	string batch_query;
 
-	// Delta-based update for table stats
+	if (!stats.initialized) {
+		// SP mode, new table: conditional INSERT to avoid duplicates on concurrent first-insert
+		batch_query +=
+		    StringUtil::Format("INSERT INTO {METADATA_CATALOG}.ducklake_table_stats "
+		                       "SELECT %s, 0, 0, 0 WHERE NOT EXISTS "
+		                       "(SELECT 1 FROM {METADATA_CATALOG}.ducklake_table_stats WHERE table_id = %s);",
+		                       FormatCatalogId(stats.table_id.index), FormatCatalogId(stats.table_id.index));
+		for (auto &col_stats : stats.column_stats) {
+			batch_query += StringUtil::Format("INSERT INTO {METADATA_CATALOG}.ducklake_table_column_stats "
+			                                  "SELECT %s, %d, false, false, NULL, NULL, NULL WHERE NOT EXISTS "
+			                                  "(SELECT 1 FROM {METADATA_CATALOG}.ducklake_table_column_stats "
+			                                  "WHERE table_id = %s AND column_id = %d);",
+			                                  FormatCatalogId(stats.table_id.index), col_stats.column_id.index,
+			                                  FormatCatalogId(stats.table_id.index), col_stats.column_id.index);
+		}
+	}
+
+	// Delta UPDATE for table-level stats (works for both initialized and !initialized)
 	batch_query += StringUtil::Format(
 	    "UPDATE {METADATA_CATALOG}.ducklake_table_stats SET record_count=record_count + %d, "
 	    "file_size_bytes=file_size_bytes + %d, next_row_id=next_row_id + %d WHERE table_id=%s;",
 	    stats.record_count, stats.table_size_bytes, stats.next_row_id, FormatCatalogId(stats.table_id.index));
 
-	// Merge-based update for column stats
-	if (!stats.column_stats.empty()) {
-		string column_stats_values;
-		for (auto &col_stats : stats.column_stats) {
-			if (!column_stats_values.empty()) {
-				column_stats_values += ",";
-			}
-			string contains_null;
-			if (col_stats.has_contains_null) {
-				contains_null = col_stats.contains_null ? "true" : "false";
-			} else {
-				contains_null = "NULL";
-			}
-			string contains_nan;
-			if (col_stats.has_contains_nan) {
-				contains_nan = col_stats.contains_nan ? "true" : "false";
-			} else {
-				contains_nan = "NULL";
-			}
-			string min_val = col_stats.has_min ? DuckLakeUtil::StatsToString(col_stats.min_val) : "NULL";
-			string max_val = col_stats.has_max ? DuckLakeUtil::StatsToString(col_stats.max_val) : "NULL";
-			string extra_stats_val = col_stats.has_extra_stats ? col_stats.extra_stats : "NULL";
-
-			column_stats_values += StringUtil::Format("(%s, %d, %s, %s, %s, %s, %s)",
-			                                          FormatCatalogId(stats.table_id.index), col_stats.column_id.index,
-			                                          contains_null, contains_nan, min_val, max_val, extra_stats_val);
-		}
+	// Absolute UPDATE for column stats (pre-merged in C++)
+	if (!column_stats_values.empty()) {
 		batch_query += StringUtil::Format(R"(
 WITH new_values(tid, cid, new_contains_null, new_contains_nan, new_min, new_max, new_extra_stats) AS (
 VALUES %s
 )
 UPDATE {METADATA_CATALOG}.ducklake_table_column_stats
-SET contains_null=contains_null OR new_contains_null::boolean,
-    contains_nan=contains_nan OR new_contains_nan::boolean,
-    min_value=CASE WHEN min_value IS NULL THEN new_min
-                   WHEN new_min IS NULL THEN min_value
-                   WHEN new_min < min_value THEN new_min ELSE min_value END,
-    max_value=CASE WHEN max_value IS NULL THEN new_max
-                   WHEN new_max IS NULL THEN max_value
-                   WHEN new_max > max_value THEN new_max ELSE max_value END,
-    extra_stats=COALESCE(new_extra_stats, extra_stats)
+SET contains_null=new_contains_null::boolean, contains_nan=new_contains_nan::boolean,
+    min_value=new_min, max_value=new_max, extra_stats=new_extra_stats
 FROM new_values
 WHERE table_id=tid AND column_id=cid;
 )",
@@ -489,6 +498,30 @@ BEGIN
                 END IF;
             END IF;
 
+            -- Created macros in dropped schemas
+            IF v_our_type IN ('created_scalar_macro', 'created_table_macro') AND v_other_type = 'dropped_schema' THEN
+                EXECUTE format('SELECT name FROM %I.ducklake_schema WHERE schema_id = $1', p_schema)
+                    INTO v_resolved_name USING v_other_value::BIGINT;
+                IF v_resolved_name IS NOT NULL THEN
+                    v_resolved_prefix := '"' || replace(v_resolved_name, '"', '""') || '".';
+                    IF position(v_resolved_prefix IN v_our_value) = 1 THEN
+                        RAISE EXCEPTION 'Transaction conflict - attempting to create macro with name "%" - but another transaction has dropped this schema', v_our_value;
+                    END IF;
+                END IF;
+            END IF;
+
+            -- Dropped schema vs created macros (reverse direction)
+            IF v_our_type = 'dropped_schema' AND v_other_type IN ('created_scalar_macro', 'created_table_macro') THEN
+                EXECUTE format('SELECT name FROM %I.ducklake_schema WHERE schema_id = $1', p_schema)
+                    INTO v_resolved_name USING v_our_value::BIGINT;
+                IF v_resolved_name IS NOT NULL THEN
+                    v_resolved_prefix := '"' || replace(v_resolved_name, '"', '""') || '".';
+                    IF position(v_resolved_prefix IN v_other_value) = 1 THEN
+                        RAISE EXCEPTION 'Transaction conflict - attempting to drop schema with index "%" - but another transaction has created a macro in this schema', v_our_value;
+                    END IF;
+                END IF;
+            END IF;
+
             -- Creating same table/view (case-insensitive name match, including cross-type table vs view)
             IF (v_our_type IN ('created_table', 'created_view')) AND (v_other_type IN ('created_table', 'created_view'))
                AND lower(v_our_value) = lower(v_other_value) THEN
@@ -597,27 +630,45 @@ BEGIN
         END LOOP;
     END LOOP;
 
-    -- File-level delete conflict detection
+    -- File-level delete conflict detection (only if table-level overlap)
     DECLARE
         v_our_deleted_files BIGINT[];
+        v_our_deleted_tables BIGINT[];
+        v_has_table_overlap BOOLEAN := FALSE;
         v_conflicting_file BIGINT;
     BEGIN
-        SELECT ARRAY_AGG(change_value::BIGINT) INTO v_our_deleted_files
+        -- Check if any of our deleted-from tables overlap with other changes
+        SELECT ARRAY_AGG(change_value::BIGINT) INTO v_our_deleted_tables
         FROM {PROC_SCHEMA}.ducklake_parse_changes(p_our_changes)
-        WHERE change_type = 'deleted_from_file';
+        WHERE change_type = 'deleted_from_table';
 
-        IF v_our_deleted_files IS NOT NULL AND array_length(v_our_deleted_files, 1) > 0 THEN
-            EXECUTE format(
-                'SELECT data_file_id FROM %I.ducklake_delete_file
-                 WHERE data_file_id = ANY($1) AND begin_snapshot > $2
-                 UNION ALL
-                 SELECT data_file_id FROM %I.ducklake_data_file
-                 WHERE data_file_id = ANY($1) AND end_snapshot IS NOT NULL AND end_snapshot > $2
-                 LIMIT 1', p_schema, p_schema
-            ) INTO v_conflicting_file USING v_our_deleted_files, p_txn_start_snapshot;
+        IF v_our_deleted_tables IS NOT NULL AND array_length(v_our_deleted_tables, 1) > 0 THEN
+            PERFORM 1 FROM {PROC_SCHEMA}.ducklake_parse_changes(v_other_changes)
+            WHERE change_type = 'deleted_from_table' AND change_value::BIGINT = ANY(v_our_deleted_tables)
+            LIMIT 1;
 
-            IF v_conflicting_file IS NOT NULL THEN
-                RAISE EXCEPTION 'Transaction conflict - attempting to delete from file "%" - but another transaction has deleted from it', v_conflicting_file;
+            v_has_table_overlap := FOUND;
+        END IF;
+
+        IF v_has_table_overlap THEN
+            -- Only then do the expensive file-level check
+            SELECT ARRAY_AGG(change_value::BIGINT) INTO v_our_deleted_files
+            FROM {PROC_SCHEMA}.ducklake_parse_changes(p_our_changes)
+            WHERE change_type = 'deleted_from_file';
+
+            IF v_our_deleted_files IS NOT NULL AND array_length(v_our_deleted_files, 1) > 0 THEN
+                EXECUTE format(
+                    'SELECT data_file_id FROM %I.ducklake_delete_file
+                     WHERE data_file_id = ANY($1) AND begin_snapshot > $2
+                     UNION ALL
+                     SELECT data_file_id FROM %I.ducklake_data_file
+                     WHERE data_file_id = ANY($1) AND end_snapshot IS NOT NULL AND end_snapshot > $2
+                     LIMIT 1', p_schema, p_schema
+                ) INTO v_conflicting_file USING v_our_deleted_files, p_txn_start_snapshot;
+
+                IF v_conflicting_file IS NOT NULL THEN
+                    RAISE EXCEPTION 'Transaction conflict - attempting to delete from file "%" - but another transaction has deleted from it', v_conflicting_file;
+                END IF;
             END IF;
         END IF;
     END;
