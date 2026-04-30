@@ -1830,23 +1830,16 @@ void DuckLakeTransaction::GetNewMacroInfo(DuckLakeCommitState &commit_state, ref
 		default:
 			throw NotImplementedException("Unsupported macro type");
 		}
-		macro_impl.sql = StringUtil::Replace(macro_impl.sql, "'", "''");
 		// Let's do the parameters
 		for (idx_t i = 0; i < impl->parameters.size(); i++) {
 			DuckLakeMacroParameters parameter;
 			parameter.parameter_name = impl->parameters[i]->GetName();
 			parameter.parameter_type = DuckLakeTypes::ToString(impl->types[i]);
-			if (impl->default_parameters.find(parameter.parameter_name) != impl->default_parameters.end()) {
-				auto value = impl->default_parameters[parameter.parameter_name]->ToString();
-				if (StringUtil::StartsWith(value, "'")) {
-					value = value.substr(1, value.size() - 2);
-				}
-				value = StringUtil::Replace(value, "'", "''");
-
-				parameter.default_value = value;
-
-				parameter.default_value_type = DuckLakeTypes::ToString(
-				    impl->default_parameters[parameter.parameter_name]->Cast<ConstantExpression>().value.type());
+			auto default_it = impl->default_parameters.find(parameter.parameter_name);
+			if (default_it != impl->default_parameters.end()) {
+				auto &const_expr = default_it->second->Cast<ConstantExpression>();
+				parameter.default_value = const_expr.value.ToString();
+				parameter.default_value_type = DuckLakeTypes::ToString(const_expr.value.type());
 			} else {
 				parameter.default_value_type = "unknown";
 			}
