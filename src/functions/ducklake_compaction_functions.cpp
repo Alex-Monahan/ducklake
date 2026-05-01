@@ -47,16 +47,15 @@ vector<OrderByNode> DuckLakeCompactor::ParseSortOrders(const DuckLakeSort &sort_
 }
 
 //! Binds ORDER BY expressions directly using ExpressionBinder.
-vector<BoundOrderByNode> DuckLakeCompactor::BindSortOrders(Binder &binder, DuckLakeTableEntry &table,
-                                                           TableIndex table_index,
+vector<BoundOrderByNode> DuckLakeCompactor::BindSortOrders(Binder &binder, const ColumnList &columns,
+                                                           const string &table_name, TableIndex table_index,
                                                            vector<OrderByNode> &pre_bound_orders) {
-	auto &columns = table.GetColumns();
 	auto column_names = columns.GetColumnNames();
 	auto column_types = columns.GetColumnTypes();
 
 	// Create a child binder with the table columns in scope
 	auto child_binder = Binder::CreateBinder(binder.context, &binder);
-	child_binder->bind_context.AddGenericBinding(table_index, table.name, column_names, column_types);
+	child_binder->bind_context.AddGenericBinding(table_index, table_name, column_names, column_types);
 
 	// Bind each ORDER BY expression directly
 	vector<BoundOrderByNode> orders;
@@ -67,6 +66,12 @@ vector<BoundOrderByNode> DuckLakeCompactor::BindSortOrders(Binder &binder, DuckL
 	}
 
 	return orders;
+}
+
+vector<BoundOrderByNode> DuckLakeCompactor::BindSortOrders(Binder &binder, DuckLakeTableEntry &table,
+                                                           TableIndex table_index,
+                                                           vector<OrderByNode> &pre_bound_orders) {
+	return BindSortOrders(binder, table.GetColumns(), table.name, table_index, pre_bound_orders);
 }
 
 //===--------------------------------------------------------------------===//
@@ -375,7 +380,7 @@ unique_ptr<LogicalOperator> DuckLakeCompactor::InsertSort(Binder &binder, unique
 	}
 
 	// Validate all column references in sort expressions exist in the table
-	DuckLakeTableEntry::ValidateSortExpressionColumns(table, pre_bound_orders);
+	DuckLakeTableEntry::ValidateSortExpressionColumns(table.GetColumns(), pre_bound_orders);
 
 	// Resolve types for the input plan (could be LogicalGet or LogicalProjection)
 	plan->ResolveOperatorTypes();

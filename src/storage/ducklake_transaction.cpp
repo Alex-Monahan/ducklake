@@ -1748,6 +1748,18 @@ void DuckLakeTransaction::GetNewTableInfo(DuckLakeCommitState &commit_state, Duc
 			inlined_entry.uuid = latest_table.GetTableUUID();
 			inlined_entry.columns = latest_table.GetTableColumns();
 			result.new_inlined_data_tables.push_back(std::move(inlined_entry));
+
+			// CREATE TABLE ... PARTITIONED BY / SORTED BY
+			if (local_change.type == LocalChangeType::CREATED) {
+				if (table.GetPartitionData()) {
+					auto partition_key = GetNewPartitionKey(commit_state, table);
+					result.new_partition_keys.push_back(std::move(partition_key));
+				}
+				if (table.GetSortData()) {
+					auto sort_key = GetNewSortKey(commit_state, table);
+					result.new_sort_keys.push_back(std::move(sort_key));
+				}
+			}
 			break;
 		}
 		default:
