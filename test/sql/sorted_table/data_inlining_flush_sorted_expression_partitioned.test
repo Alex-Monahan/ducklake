@@ -1,0 +1,76 @@
+# name: test/sql/sorted_table/data_inlining_flush_sorted_expression_partitioned.test
+# description: Flushing inlined deletes with an expression sort key on a partitioned table
+# group: [sorted_table]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION __TEST_DIR__/{UUID}.db
+
+test-env DATA_PATH __TEST_DIR__
+
+
+statement ok
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS dl (DATA_PATH '${DATA_PATH}/ducklake_inlining_flush_sorted_expression_partitioned', DATA_INLINING_ROW_LIMIT 100)
+
+statement ok
+USE dl
+
+statement ok
+CREATE TABLE t(p INTEGER, id INTEGER, val INTEGER)
+
+statement ok
+ALTER TABLE t SET PARTITIONED BY (p)
+
+statement ok
+INSERT INTO t VALUES
+    (0, 1, 0), (0, 2, 0), (0, 3, 0),
+    (1, 1, 0), (1, 2, 0), (1, 4, 0)
+
+# Update one row in each partition to generate inlined deletes
+statement ok
+UPDATE t SET val = val + 1 WHERE p = 0 AND id = 2
+
+statement ok
+UPDATE t SET val = val + 5 WHERE p = 1 AND id = 4
+
+# Use an expression sort key, not a simple column reference
+statement ok
+ALTER TABLE t SET SORTED BY ((id + 0) ASC NULLS LAST)
+
+# Live state per partition before flush.
+query III
+SELECT p, id, val FROM t ORDER BY p, id
+----
+0	1	0
+0	2	1
+0	3	0
+1	1	0
+1	2	0
+1	4	5
+
+statement ok
+CALL ducklake_flush_inlined_data('dl', table_name => 't')
+
+# Each (partition, id) combination should appear exactly once after flush.
+query III
+SELECT p, id, COUNT(*) FROM t GROUP BY p, id ORDER BY p, id
+----
+0	1	1
+0	2	1
+0	3	1
+1	1	1
+1	2	1
+1	4	1
+
+# Final values must match the live state from before flush.
+query III
+SELECT p, id, val FROM t ORDER BY p, id
+----
+0	1	0
+0	2	1
+0	3	0
+1	1	0
+1	2	0
+1	4	5

@@ -1,0 +1,64 @@
+# name: test/sql/sorted_table/data_inlining_flush_sorted_macro_with_deletes_in_transaction.test
+# description: Flushing inlined updates inside an open transaction with a transaction-local DuckLake macro sort key must bind correctly via the metadata connection
+# group: [sorted_table]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION __TEST_DIR__/{UUID}.db
+
+test-env DATA_PATH __TEST_DIR__
+
+
+statement ok
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS dl (DATA_PATH '${DATA_PATH}/exp_macro_deletes_in_txn', DATA_INLINING_ROW_LIMIT 100)
+
+statement ok
+USE dl
+
+statement ok
+CREATE TABLE t(id INTEGER, val INTEGER)
+
+statement ok
+INSERT INTO t VALUES (2, 0), (1, 0), (3, 0)
+
+statement ok
+BEGIN
+
+# transaction-local macro (uncommitted) - lives only in the user-side
+# DuckLakeTransaction.new_scalar_macros until COMMIT.
+statement ok
+CREATE MACRO double_id(x) AS (x * 2)
+
+# Sort key references the transaction-local macro. The per-file deletes query
+# emitted by DuckLakeFlushData::Finalize binds this sort expression on the
+# metadata connection's ClientContext, which is a different DuckLakeTransaction
+# than the user's. With linked_transaction wired up, the metadata-side
+# transaction must consult the user-side transaction's transaction-local
+# new_scalar_macros to resolve double_id().
+statement ok
+ALTER TABLE t SET SORTED BY (double_id(id) ASC NULLS LAST)
+
+# transaction-local UPDATEs that produce inlined deletes (uncommitted).
+statement ok
+UPDATE t SET val = val + 1 WHERE id = 2
+
+statement ok
+UPDATE t SET val = val + 1 WHERE id = 2
+
+statement ok
+UPDATE t SET val = val + 1 WHERE id = 2
+
+statement ok
+CALL ducklake_flush_inlined_data('dl', table_name => 't')
+
+statement ok
+COMMIT
+
+query II
+SELECT id, val FROM t ORDER BY id
+----
+1	0
+2	3
+3	0

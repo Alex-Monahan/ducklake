@@ -28,6 +28,9 @@
 #include "duckdb/common/types/blob.hpp"
 #include "functions/ducklake_compaction_functions.hpp"
 #include "storage/ducklake_sort_data.hpp"
+#include "common/ducklake_util.hpp"
+#include "duckdb/main/client_data.hpp"
+#include "duckdb/catalog/catalog_search_path.hpp"
 
 namespace duckdb {
 
@@ -123,6 +126,51 @@ SinkFinalizeType DuckLakeFlushData::Finalize(Pipeline &pipeline, Event &event, C
 		// Track cumulative row offset per partition so each file knows its range
 		unordered_map<string, idx_t> partition_row_offsets;
 
+		// Run the per-file deletes queries through the SAME metadata connection that the rest of the
+		// transaction uses. This is necessary because the user may have uncommitted writes (inserts and
+		// updates against the inlined table) made via that connection inside an open BEGIN ... COMMIT
+		// block; a fresh Connection would not see them. The metadata connection's search path is
+		// normally clamped to the metadata catalog only, so we widen it for the duration of this loop
+		// to also include the DuckLake user catalog/schema (so user-defined sort expressions bind
+		// correctly). User-defined sort expressions that reference uncommitted (transaction-local)
+		// catalog entries -- e.g. a DuckLake macro CREATE'd in the same BEGIN..COMMIT block -- resolve
+		// because the metadata-connection-side DuckLakeTransaction is linked to the user-side one (see
+		// DuckLakeTransactionManager::StartTransaction / DuckLakeTransaction::linked_transaction), so
+		// transaction-local lookups in DuckLakeSchemaEntry consult both transactions. The original
+		// search path is restored on scope exit.
+		auto &ducklake_catalog = transaction.GetCatalog();
+		auto &meta_conn = transaction.GetConnection();
+		auto &meta_client_data = ClientData::Get(*meta_conn.context);
+		auto saved_search_paths = meta_client_data.catalog_search_path->GetSetPaths();
+
+		struct SearchPathRestorer {
+			SearchPathRestorer(CatalogSearchPath &path, vector<CatalogSearchEntry> saved)
+			    : path(path), saved(std::move(saved)) {
+			}
+			~SearchPathRestorer() {
+				path.Set(saved, CatalogSetPathType::SET_DIRECTLY);
+			}
+			CatalogSearchPath &path;
+			vector<CatalogSearchEntry> saved;
+		};
+		// Build the widened search path: keep the metadata entry first (so {METADATA_CATALOG} bare
+		// references continue to resolve identically), then append every schema in the DuckLake user
+		// catalog (committed + transaction-local) so user-defined sort expressions bind regardless of
+		// which schema the referenced macro lives in. We pass the user's ClientContext (the `context`
+		// argument to Finalize, not the metadata connection's context) so transaction-local schemas
+		// created in the same BEGIN..COMMIT block are included.
+		CatalogSearchEntry metadata_entry(ducklake_catalog.MetadataDatabaseName(),
+		                                  ducklake_catalog.MetadataSchemaName());
+		if (metadata_entry.schema.empty()) {
+			metadata_entry.schema = "main";
+		}
+		vector<CatalogSearchEntry> widened {metadata_entry};
+		for (auto &schema_ref : ducklake_catalog.GetSchemas(context)) {
+			widened.emplace_back(ducklake_catalog.GetName(), schema_ref.get().name);
+		}
+		meta_client_data.catalog_search_path->Set(widened, CatalogSetPathType::SET_DIRECTLY);
+		SearchPathRestorer restorer(*meta_client_data.catalog_search_path, std::move(saved_search_paths));
+
 		for (auto &file : global_state.written_files) {
 			// Build partition filter (empty string for non-partitioned tables)
 			string partition_filter;
@@ -141,12 +189,13 @@ SinkFinalizeType DuckLakeFlushData::Finalize(Pipeline &pipeline, Event &event, C
 			string extra_filter = partition_filter.empty() ? "" : " AND " + partition_filter;
 			// When the table has sort metadata, the file is written in sorted order.
 			// The ORDER BY must match the actual file order so delete positions are correct.
-			string order_by = "row_id, begin_snapshot";
+			// Tiebreakers are pinned to ASC NULLS LAST (matching the file-side LogicalOrder) so
+			// the user's default_null_order setting cannot diverge them.
+			string order_by = "row_id ASC NULLS LAST, begin_snapshot ASC NULLS LAST";
 			if (!sort_order_sql.empty()) {
-				order_by = sort_order_sql + ", row_id, begin_snapshot";
+				order_by = sort_order_sql + ", row_id ASC NULLS LAST, begin_snapshot ASC NULLS LAST";
 			}
-			auto deleted_rows_result =
-			    transaction.Query(snapshot, StringUtil::Format(R"(
+			auto query = StringUtil::Format(R"(
 				WITH all_rows AS (
 					SELECT end_snapshot, ROW_NUMBER() OVER (ORDER BY %s) - 1 AS output_position
 					FROM {METADATA_CATALOG}.%s
@@ -156,8 +205,12 @@ SinkFinalizeType DuckLakeFlushData::Finalize(Pipeline &pipeline, Event &event, C
 				FROM all_rows
 				WHERE end_snapshot IS NOT NULL
 				AND output_position >= %d AND output_position < %d;)",
-			                                                   order_by, inlined_table.table_name, extra_filter,
-			                                                   file_offset, file_offset + file.row_count));
+			                                order_by, inlined_table.table_name, extra_filter, file_offset,
+			                                file_offset + file.row_count);
+			auto deleted_rows_result = transaction.Query(snapshot, query);
+			if (deleted_rows_result->HasError()) {
+				deleted_rows_result->GetErrorObject().Throw("Failed to query inlined deletions for flush: ");
+			}
 
 			for (auto &row : *deleted_rows_result) {
 				auto end_snap = row.GetValue<int64_t>(0);
@@ -359,7 +412,9 @@ unique_ptr<LogicalOperator> DuckLakeDataFlusher::GenerateFlushCommand() {
 	string sort_order_sql;
 	auto sort_data = latest_table.GetSortData();
 	if (sort_data) {
-		root = DuckLakeCompactor::InsertSort(binder, root, latest_table, sort_data);
+		// Pass add_tiebreakers=true so InsertSort appends (row_id, begin_snapshot) as final ORDER BY
+		// columns, matching the deletes-query ORDER BY exactly.
+		root = DuckLakeCompactor::InsertSort(binder, root, latest_table, sort_data, true);
 		sort_order_sql = DuckLakeSort::BuildSortOrderSQL(*sort_data, latest_table.GetColumns(), table.GetColumns());
 	}
 

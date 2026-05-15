@@ -729,9 +729,19 @@ Connection &DuckLakeTransaction::GetConnection() {
 		// set max error reporting to 0 so that during error reporting we don't traverse other schemas / catalogs
 		auto &client_config = ClientConfig::GetConfig(*connection->context);
 		client_config.user_settings.SetUserSetting(CatalogErrorMaxSchemasSetting::SettingIndex, Value::UBIGINT(0));
+		// publish the metadata-connection ClientContext pointer BEFORE BeginTransaction so a recursive
+		// StartTransaction triggered from inside BeginTransaction can identify this context as the
+		// metadata-side sibling and skip taking connection_lock (which we currently hold).
+		metadata_connection_context.store(connection->context.get(), std::memory_order_release);
 		connection->BeginTransaction();
 	}
 	return *connection;
+}
+
+bool DuckLakeTransaction::IsMetadataConnectionContext(ClientContext &context) const {
+	// Lock-free read: avoids re-entering connection_lock from inside StartTransaction (which itself
+	// can be called recursively from within GetConnection -> BeginTransaction).
+	return metadata_connection_context.load(std::memory_order_acquire) == &context;
 }
 
 case_insensitive_map_t<unique_ptr<DuckLakeCatalogSet>> &DuckLakeTransaction::GetNewMacroMap(CatalogType type) {
@@ -3045,6 +3055,11 @@ void DuckLakeTransaction::DropEntry(CatalogEntry &entry) {
 }
 
 bool DuckLakeTransaction::IsDeleted(CatalogEntry &entry) {
+	// If this is the metadata-connection-side sibling of a user-side transaction, the user-side
+	// holds the actual drop sets; the metadata side never drops catalog entries on its own.
+	if (linked_transaction) {
+		return linked_transaction->IsDeleted(entry);
+	}
 	switch (entry.type) {
 	case CatalogType::TABLE_ENTRY: {
 		auto &table_entry = entry.Cast<DuckLakeTableEntry>();
@@ -3072,6 +3087,10 @@ bool DuckLakeTransaction::IsDeleted(CatalogEntry &entry) {
 }
 
 bool DuckLakeTransaction::IsRenamed(CatalogEntry &entry) {
+	// See IsDeleted: delegate to the linked user-side transaction when we are the metadata sibling.
+	if (linked_transaction) {
+		return linked_transaction->IsRenamed(entry);
+	}
 	switch (entry.type) {
 	case CatalogType::TABLE_ENTRY: {
 		auto &table_entry = entry.Cast<DuckLakeTableEntry>();
@@ -3205,12 +3224,21 @@ DuckLakeCatalogSet &DuckLakeTransaction::GetOrCreateTransactionLocalEntries(Cata
 }
 
 optional_ptr<DuckLakeCatalogSet> DuckLakeTransaction::GetTransactionLocalSchemas() {
+	// See IsDeleted: delegate to the linked user-side transaction when we are the metadata sibling.
+	if (linked_transaction) {
+		return linked_transaction->GetTransactionLocalSchemas();
+	}
 	return new_schemas;
 }
 
 optional_ptr<CatalogEntry> DuckLakeTransaction::GetTransactionLocalEntry(CatalogType catalog_type,
                                                                          const string &schema_name,
                                                                          const string &entry_name) {
+	// See IsDeleted: delegate to the linked user-side transaction when we are the metadata sibling.
+	// (The user-side `this` then handles the lookup against its own new_tables / new_macros maps.)
+	if (linked_transaction) {
+		return linked_transaction->GetTransactionLocalEntry(catalog_type, schema_name, entry_name);
+	}
 	auto set = GetTransactionLocalEntries(catalog_type, schema_name);
 	if (!set) {
 		return nullptr;
@@ -3220,6 +3248,10 @@ optional_ptr<CatalogEntry> DuckLakeTransaction::GetTransactionLocalEntry(Catalog
 
 optional_ptr<DuckLakeCatalogSet> DuckLakeTransaction::GetTransactionLocalEntries(CatalogType catalog_type,
                                                                                  const string &schema_name) {
+	// See IsDeleted: delegate to the linked user-side transaction when we are the metadata sibling.
+	if (linked_transaction) {
+		return linked_transaction->GetTransactionLocalEntries(catalog_type, schema_name);
+	}
 	switch (catalog_type) {
 	case CatalogType::TABLE_ENTRY:
 	case CatalogType::VIEW_ENTRY: {

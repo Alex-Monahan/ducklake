@@ -1,0 +1,63 @@
+# name: test/sql/sorted_table/data_inlining_flush_sorted_expression_deletes_999.test
+# description: Reproducer for issue #999 — flushing inlined updates with an expression sort key produces wrong rows
+# group: [sorted_table]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION __TEST_DIR__/{UUID}.db
+
+test-env DATA_PATH __TEST_DIR__
+
+
+statement ok
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS dl (DATA_PATH '${DATA_PATH}/ducklake_inlining_flush_sorted_expr_deletes_999', DATA_INLINING_ROW_LIMIT 100)
+
+statement ok
+USE dl
+
+statement ok
+CREATE TABLE t(id INTEGER, val INTEGER)
+
+statement ok
+INSERT INTO t VALUES (2, 0), (1, 0), (3, 0)
+
+statement ok
+UPDATE t SET val = val + 1 WHERE id = 2
+
+statement ok
+UPDATE t SET val = val + 1 WHERE id = 2
+
+statement ok
+UPDATE t SET val = val + 1 WHERE id = 2
+
+# The trigger: a sort key that is an *expression*, not a simple column reference.
+statement ok
+ALTER TABLE t SET SORTED BY ((id + 0) ASC NULLS LAST)
+
+# Live state before flush is correct: id 1, 2, 3 with the latest val for id=2.
+query II
+SELECT id, val FROM t ORDER BY id
+----
+1	0
+2	3
+3	0
+
+statement ok
+CALL ducklake_flush_inlined_data('dl', table_name => 't')
+
+# After flush we should still see exactly three live rows: (1,0), (2,3), (3,0).
+query II
+SELECT id, COUNT(*) FROM t GROUP BY id ORDER BY id
+----
+1	1
+2	1
+3	1
+
+query II
+SELECT id, val FROM t ORDER BY id
+----
+1	0
+2	3
+3	0

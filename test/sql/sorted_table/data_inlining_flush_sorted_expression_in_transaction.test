@@ -1,0 +1,90 @@
+# name: test/sql/sorted_table/data_inlining_flush_sorted_expression_in_transaction.test
+# description: Flushing inlined data with an expression sort key inside an open transaction must see uncommitted writes
+# group: [sorted_table]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION __TEST_DIR__/{UUID}.db
+
+test-env DATA_PATH __TEST_DIR__
+
+
+statement ok
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS dl (DATA_PATH '${DATA_PATH}/ducklake_inlining_flush_sorted_expr_in_txn', DATA_INLINING_ROW_LIMIT 100)
+
+statement ok
+USE dl
+
+statement ok
+CREATE TABLE t(id INTEGER, val INTEGER)
+
+# Set the sort key (expression, not a bare column) before any inlined data exists,
+# so we don't hit the "ALTER on table with transaction-local inlined data" restriction inside the txn.
+statement ok
+ALTER TABLE t SET SORTED BY ((id + 0) ASC NULLS LAST)
+
+statement ok
+INSERT INTO t VALUES (2, 0), (1, 0), (3, 0)
+
+# Wrap the UPDATE-and-flush in a single transaction. Inside the txn, the UPDATEs
+# write end_snapshot=...rows to the inlined deletion table via DuckLake's metadata
+# connection; those writes are uncommitted. The per-file deletes query that the
+# flush issues has to see them, otherwise no deletes are recorded for those updated
+# rows and we lose data on COMMIT.
+statement ok
+BEGIN
+
+statement ok
+UPDATE t SET val = val + 1 WHERE id = 2
+
+statement ok
+UPDATE t SET val = val + 1 WHERE id = 2
+
+statement ok
+UPDATE t SET val = val + 1 WHERE id = 2
+
+# State before flush (still inside the txn) is correct.
+query II
+SELECT id, val FROM t ORDER BY id
+----
+1	0
+2	3
+3	0
+
+statement ok
+CALL ducklake_flush_inlined_data('dl', table_name => 't')
+
+# Still inside the transaction, the post-flush state must be correct.
+query II
+SELECT id, COUNT(*) FROM t GROUP BY id ORDER BY id
+----
+1	1
+2	1
+3	1
+
+query II
+SELECT id, val FROM t ORDER BY id
+----
+1	0
+2	3
+3	0
+
+statement ok
+COMMIT
+
+# After commit, the data must be exactly three live rows with the latest val for id=2.
+query II
+SELECT id, COUNT(*) FROM t GROUP BY id ORDER BY id
+----
+1	1
+2	1
+3	1
+
+query II
+SELECT id, val FROM t ORDER BY id
+----
+1	0
+2	3
+3	0

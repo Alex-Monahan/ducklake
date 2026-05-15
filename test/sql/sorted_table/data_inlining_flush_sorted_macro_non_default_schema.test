@@ -1,0 +1,124 @@
+# name: test/sql/sorted_table/data_inlining_flush_sorted_macro_non_default_schema.test
+# description: Sort expression references a DuckLake macro in a non-default schema. The widened search
+#              path in DuckLakeFlushData::Finalize must enumerate ALL schemas in the DuckLake catalog
+#              (committed + transaction-local) so the binder can resolve the schema-qualified macro.
+# group: [sorted_table]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION __TEST_DIR__/{UUID}.db
+
+test-env DATA_PATH __TEST_DIR__
+
+
+statement ok
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS dl (DATA_PATH '${DATA_PATH}/ducklake_macro_non_default_schema', DATA_INLINING_ROW_LIMIT 100)
+
+statement ok
+USE dl
+
+# Macro in a non-default schema (committed before any flush).
+statement ok
+CREATE SCHEMA analytics
+
+statement ok
+CREATE MACRO analytics.double_id(x) AS (x * 2)
+
+# Confirm the macro is in dl.analytics, not dl.main.
+query III
+SELECT database_name, schema_name, function_name FROM duckdb_functions() WHERE function_name = 'double_id'
+----
+dl	analytics	double_id
+
+statement ok
+CREATE TABLE t(id INTEGER, val INTEGER)
+
+statement ok
+INSERT INTO t VALUES (2, 0), (1, 0), (3, 0)
+
+# Three updates create inlined deletes that the flush must align with the file order.
+statement ok
+UPDATE t SET val = val + 1 WHERE id = 2
+
+statement ok
+UPDATE t SET val = val + 1 WHERE id = 2
+
+statement ok
+UPDATE t SET val = val + 1 WHERE id = 2
+
+# Schema-qualified macro reference. If the widening only included dl.main, this would fail to bind.
+statement ok
+ALTER TABLE t SET SORTED BY (analytics.double_id(id) ASC NULLS LAST)
+
+# Live state before flush is correct.
+query II
+SELECT id, val FROM t ORDER BY id
+----
+1	0
+2	3
+3	0
+
+statement ok
+CALL ducklake_flush_inlined_data('dl', table_name => 't')
+
+# After flush we should still see exactly three live rows: (1,0), (2,3), (3,0).
+query II
+SELECT id, COUNT(*) FROM t GROUP BY id ORDER BY id
+----
+1	1
+2	1
+3	1
+
+query II
+SELECT id, val FROM t ORDER BY id
+----
+1	0
+2	3
+3	0
+
+
+# Variant: the macro AND its schema are created inside a BEGIN..COMMIT block in which the flush also runs.
+# This exercises both the schema-enumeration (must include transaction-local schemas) and the
+# linked_transaction mechanism (transaction-local macros visible via the linked user transaction).
+
+statement ok
+CREATE TABLE t2(id INTEGER, val INTEGER)
+
+statement ok
+INSERT INTO t2 VALUES (2, 0), (1, 0), (3, 0)
+
+statement ok
+BEGIN
+
+statement ok
+CREATE SCHEMA reports
+
+statement ok
+CREATE MACRO reports.triple_id(x) AS (x * 3)
+
+statement ok
+ALTER TABLE t2 SET SORTED BY (reports.triple_id(id) ASC NULLS LAST)
+
+statement ok
+UPDATE t2 SET val = val + 1 WHERE id = 2
+
+statement ok
+UPDATE t2 SET val = val + 1 WHERE id = 2
+
+statement ok
+UPDATE t2 SET val = val + 1 WHERE id = 2
+
+statement ok
+CALL ducklake_flush_inlined_data('dl', table_name => 't2')
+
+statement ok
+COMMIT
+
+query II
+SELECT id, val FROM t2 ORDER BY id
+----
+1	0
+2	3
+3	0

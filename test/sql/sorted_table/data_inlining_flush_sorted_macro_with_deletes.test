@@ -1,0 +1,72 @@
+# name: test/sql/sorted_table/data_inlining_flush_sorted_macro_with_deletes.test
+# description: Flushing inlined updates with a DuckLake-stored macro sort key resolves and produces the right delete vector
+# group: [sorted_table]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION __TEST_DIR__/{UUID}.db
+
+test-env DATA_PATH __TEST_DIR__
+
+
+statement ok
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS dl (DATA_PATH '${DATA_PATH}/ducklake_inlining_flush_sorted_macro_with_deletes', DATA_INLINING_ROW_LIMIT 100)
+
+statement ok
+USE dl
+
+statement ok
+CREATE MACRO double_id(x) AS (x * 2)
+
+# Sanity-check that the macro is stored in the DuckLake catalog (not in-memory or system).
+query I
+SELECT COUNT(*) FROM duckdb_functions() WHERE function_name = 'double_id' AND database_name = 'dl'
+----
+1
+
+statement ok
+CREATE TABLE t(id INTEGER, val INTEGER)
+
+statement ok
+INSERT INTO t VALUES (2, 0), (1, 0), (3, 0)
+
+statement ok
+UPDATE t SET val = val + 1 WHERE id = 2
+
+statement ok
+UPDATE t SET val = val + 1 WHERE id = 2
+
+statement ok
+UPDATE t SET val = val + 1 WHERE id = 2
+
+# The trigger: a sort key that is a DuckLake-stored macro applied to a column.
+statement ok
+ALTER TABLE t SET SORTED BY (double_id(id) ASC NULLS LAST)
+
+# Live state before flush is correct.
+query II
+SELECT id, val FROM t ORDER BY id
+----
+1	0
+2	3
+3	0
+
+statement ok
+CALL ducklake_flush_inlined_data('dl', table_name => 't')
+
+# After flush we should still see exactly three live rows.
+query II
+SELECT id, COUNT(*) FROM t GROUP BY id ORDER BY id
+----
+1	1
+2	1
+3	1
+
+query II
+SELECT id, val FROM t ORDER BY id
+----
+1	0
+2	3
+3	0

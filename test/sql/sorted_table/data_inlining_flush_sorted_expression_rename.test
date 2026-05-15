@@ -1,0 +1,71 @@
+# name: test/sql/sorted_table/data_inlining_flush_sorted_expression_rename.test
+# description: Flushing inlined deletes for an expression sort key after a column rename uses the renamed identifier
+# group: [sorted_table]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION __TEST_DIR__/{UUID}.db
+
+test-env DATA_PATH __TEST_DIR__
+
+
+statement ok
+ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS dl (DATA_PATH '${DATA_PATH}/ducklake_inlining_flush_sorted_expression_rename', DATA_INLINING_ROW_LIMIT 100)
+
+statement ok
+USE dl
+
+statement ok
+CREATE TABLE t(id INTEGER, val INTEGER)
+
+statement ok
+INSERT INTO t VALUES (1, 0), (2, 0), (3, 0)
+
+statement ok
+UPDATE t SET val = val + 1 WHERE id = 2
+
+# Set the sort key to an expression on the (still-named) column id
+statement ok
+ALTER TABLE t SET SORTED BY ((id + 0) ASC NULLS LAST)
+
+# Rename the column the expression refers to - the stored expression text still says (id + 0),
+# but BuildSortOrderSQL must rewrite it to use the new column name during flush.
+statement ok
+ALTER TABLE t RENAME COLUMN id TO new_id
+
+statement ok
+INSERT INTO t (new_id, val) VALUES (4, 0)
+
+statement ok
+UPDATE t SET val = val + 10 WHERE new_id = 2
+
+# Live state before flush.
+query II
+SELECT new_id, val FROM t ORDER BY new_id
+----
+1	0
+2	11
+3	0
+4	0
+
+statement ok
+CALL ducklake_flush_inlined_data('dl', table_name => 't')
+
+# After flush each id should still appear once with its latest value.
+query II
+SELECT new_id, COUNT(*) FROM t GROUP BY new_id ORDER BY new_id
+----
+1	1
+2	1
+3	1
+4	1
+
+query II
+SELECT new_id, val FROM t ORDER BY new_id
+----
+1	0
+2	11
+3	0
+4	0

@@ -176,6 +176,17 @@ public:
 
 	static DuckLakeTransaction &Get(ClientContext &context, Catalog &catalog);
 
+	//! When this transaction is the metadata-connection-side sibling of a user-side DuckLakeTransaction,
+	//! transaction-local catalog lookups (transaction-local macros, views, dropped/renamed entries)
+	//! consult the user-side transaction here as well. This makes catalog state consistent across both
+	//! ClientContexts within one DuckLake transaction without exposing macros or other user state to
+	//! unrelated callers of transaction.Query.
+	optional_ptr<DuckLakeTransaction> linked_transaction;
+
+	//! Returns true if the given context is the ClientContext owned by this transaction's metadata
+	//! connection (used by the transaction manager to detect metadata-side siblings).
+	bool IsMetadataConnectionContext(ClientContext &context) const;
+
 	void CreateEntry(unique_ptr<CatalogEntry> entry);
 	void DropEntry(CatalogEntry &entry);
 	bool IsDeleted(CatalogEntry &entry);
@@ -342,8 +353,14 @@ private:
 	DuckLakeSnapshotCommit commit_info;
 	DatabaseInstance &db;
 	unique_ptr<DuckLakeMetadataManager> metadata_manager;
-	mutex connection_lock;
+	mutable mutex connection_lock;
 	unique_ptr<Connection> connection;
+	//! Lock-free pointer to the metadata connection's ClientContext. Published with release semantics
+	//! after the connection is fully initialized; read with acquire semantics by IsMetadataConnectionContext.
+	//! Kept separate from `connection` so the transaction manager's StartTransaction can detect
+	//! metadata-side siblings without taking connection_lock (which would re-enter from inside
+	//! GetConnection -> BeginTransaction -> StartTransaction on a non-recursive mutex).
+	atomic<ClientContext *> metadata_connection_context {nullptr};
 	//! The snapshot of the transaction (latest snapshot in DuckLake)
 	mutex snapshot_lock;
 	unique_ptr<DuckLakeSnapshot> snapshot;

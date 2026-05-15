@@ -19,6 +19,20 @@ Transaction &DuckLakeTransactionManager::StartTransaction(ClientContext &context
 	}
 	auto &result = *transaction;
 	lock_guard<mutex> l(transaction_lock);
+	// If this context is the ClientContext owned by an existing transaction's metadata connection,
+	// link the new transaction to that user-side transaction. The metadata connection's transaction
+	// will then consult the user-side transaction's transaction-local catalog state during lookups
+	// (see DuckLakeSchemaEntry::LookupEntry / GetSimilarEntry). IsMetadataConnectionContext is
+	// lock-free (atomic ClientContext pointer) so it is safe to call while we hold transaction_lock,
+	// even when this StartTransaction was reached recursively from inside another transaction's
+	// GetConnection -> BeginTransaction (which holds that transaction's connection_lock).
+	for (auto &entry : transactions) {
+		auto &existing = entry.second->Cast<DuckLakeTransaction>();
+		if (existing.IsMetadataConnectionContext(context)) {
+			transaction->linked_transaction = &existing;
+			break;
+		}
+	}
 	transactions[result] = std::move(transaction);
 	return result;
 }
