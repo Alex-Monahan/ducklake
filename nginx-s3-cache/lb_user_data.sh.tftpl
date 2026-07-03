@@ -1,0 +1,41 @@
+#!/bin/bash
+set -euo pipefail
+
+dnf -y update
+dnf -y install nginx
+
+# Consistent-hash load balancer: a given object (URI + range) always maps to the
+# same backend cache node, maximising cache hit rate and avoiding duplicate caching.
+cat >/etc/nginx/conf.d/s3cache-lb.conf <<'NGINX'
+upstream s3_cache_gateways {
+    # Hash on URI + range so each byte-range slice is pinned to one node.
+    hash $request_uri$http_range consistent;
+
+%{ for ip in backends ~}
+    server ${ip}:80 max_fails=3 fail_timeout=10s;
+%{ endfor ~}
+
+    keepalive 64;
+}
+
+server {
+    listen 80;
+
+    # Large parquet range reads: don't buffer whole responses to disk on the LB.
+    proxy_buffering off;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+
+    location / {
+        proxy_pass http://s3_cache_gateways;
+        proxy_set_header Host $host;
+        proxy_read_timeout 300s;
+    }
+}
+NGINX
+
+# Remove the default server block to avoid port 80 conflict.
+sed -i '/server {/,/^}/d' /etc/nginx/nginx.conf || true
+
+systemctl enable --now nginx
+nginx -t && systemctl reload nginx
