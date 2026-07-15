@@ -279,8 +279,8 @@ SELECT count(*) FROM ducklake_metadata.ducklake_data_file WHERE table_id = getva
 ----
 0
 
-# Test 10: same-transaction CREATE-inline + ALTER-set must NOT emit duplicate partition rows.
-# The reverse-chain commit walk has to dedupe so only the latest (ALTER) wins.
+# Test 10: same-transaction CREATE-inline + ALTER-set. Both specs are persisted (the CREATE's spec
+# could be referenced by data files written before the ALTER), but only the ALTER's spec is active.
 statement ok
 BEGIN
 
@@ -299,21 +299,24 @@ COMMIT
 statement ok
 SET VARIABLE t_create_then_alter_id = (SELECT table_id FROM ducklake_metadata.ducklake_table WHERE table_name = 't_create_then_alter')
 
-# exactly one partition_info row (the ALTER's), not two
-query I
-SELECT count(*) FROM ducklake_metadata.ducklake_partition_info WHERE table_id = getvariable('t_create_then_alter_id')
+# exactly one ACTIVE partition_info row (the ALTER's); the CREATE's superseded spec is persisted
+# with an empty validity interval (begin_snapshot = end_snapshot)
+query II
+SELECT count(*) FILTER (end_snapshot IS NULL), count(*) FILTER (begin_snapshot = end_snapshot)
+FROM ducklake_metadata.ducklake_partition_info WHERE table_id = getvariable('t_create_then_alter_id')
 ----
-1
+1	1
 
 # resolve the column_id of b separately so the check below only scans one metadata table
 statement ok
 SET VARIABLE t_create_then_alter_b_col = (SELECT column_id FROM ducklake_metadata.ducklake_column WHERE table_id = getvariable('t_create_then_alter_id') AND column_name = 'b' AND end_snapshot IS NULL)
 
-# the surviving partition row references column b (the ALTER's choice), not a (the inline create table's).
+# the active partition row references column b (the ALTER's choice), not a (the inline create table's).
 query III
 SELECT partition_key_index, column_id = getvariable('t_create_then_alter_b_col'), transform
-FROM ducklake_metadata.ducklake_partition_column
-WHERE table_id = getvariable('t_create_then_alter_id')
+FROM ducklake_metadata.ducklake_partition_column part_col
+JOIN ducklake_metadata.ducklake_partition_info part USING (partition_id)
+WHERE part_col.table_id = getvariable('t_create_then_alter_id') AND part.end_snapshot IS NULL
 ----
 0	true	identity
 

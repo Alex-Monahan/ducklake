@@ -1592,8 +1592,20 @@ string DuckLakeTransactionState::CommitChanges(DuckLakeCommitState &commit_state
 		batch_queries += DuckLakeMetadataManager::WriteNewTables(result.new_tables, resolved_table_paths);
 		auto existing_catalog = DuckLakeMetadataManager::BuildCatalogForSnapshot(
 		    commit_snapshot, context.query_metadata_with_snapshot, data_path, separator);
-		batch_queries +=
-		    DuckLakeMetadataManager::WriteNewPartitionKeys(existing_catalog.partitions, result.new_partition_keys);
+		map<idx_t, idx_t> reused_partition_ids;
+		batch_queries += DuckLakeMetadataManager::WriteNewPartitionKeys(
+		    existing_catalog.partitions, result.new_partition_keys, reused_partition_ids);
+		// A partition change that ends up identical to the already-committed spec is not written -
+		// re-point data files written under the discarded ids to the committed spec instead.
+		// This must happen before data files are emitted (they remap through committed_partition_ids).
+		if (!reused_partition_ids.empty()) {
+			for (auto &entry : commit_state.committed_partition_ids) {
+				auto reused_entry = reused_partition_ids.find(entry.second);
+				if (reused_entry != reused_partition_ids.end()) {
+					entry.second = reused_entry->second;
+				}
+			}
+		}
 		batch_queries += DuckLakeMetadataManager::WriteNewViews(result.new_views);
 		batch_queries += DuckLakeMetadataManager::WriteNewTags(result.new_tags);
 		batch_queries += DuckLakeMetadataManager::WriteNewColumnTags(result.new_column_tags);

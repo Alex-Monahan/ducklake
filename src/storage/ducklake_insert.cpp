@@ -760,7 +760,9 @@ PhysicalOperator &DuckLakeInsert::PlanInsert(ClientContext &context, PhysicalPla
                                              DuckLakeTableEntry &table, string encryption_key) {
 	auto partition_data = table.GetPartitionData();
 	optional_idx partition_id;
-	if (partition_data) {
+	if (partition_data && !partition_data->fields.empty()) {
+		// a spec without fields (RESET PARTITIONED BY in this transaction) does not partition the data -
+		// files written under it must not be tagged with its partition id
 		partition_id = partition_data->partition_id;
 	}
 	vector<LogicalType> return_types;

@@ -1,0 +1,117 @@
+# name: test/sql/create_table_inline_partition_sort/create_table_inline_partition_evolution.test
+# description: Partition specs referenced by CTAS data files survive same-transaction partition evolution
+# group: [create_table_inline_partition_sort]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+# Force CTAS rows into Parquet so their CREATE-time partition_id is recorded in ducklake_data_file.
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/inline_partition_evolution', METADATA_CATALOG 'ducklake_meta', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+# CTAS writes files using the initial (a) partition spec. The ALTER creates a new (b) spec in the
+# same transaction. Commit must preserve both specs because existing files still reference the first,
+# while the second becomes active for future writes.
+statement ok
+BEGIN
+
+statement ok
+CREATE TABLE partition_evolution PARTITIONED BY (a) AS
+SELECT 1 AS a, 101 AS b
+
+statement ok
+ALTER TABLE partition_evolution SET PARTITIONED BY (b)
+
+statement ok
+COMMIT
+
+# Every partition_id referenced by a committed data file must resolve to a persisted partition spec.
+# CTAS must have produced a data file with a partition spec.
+query I
+SELECT count(*)
+FROM ducklake_meta.ducklake_data_file
+----
+1
+
+# Every partition_id referenced by a data file must resolve to a persisted partition spec.
+query I
+SELECT count(*)
+FROM ducklake_meta.ducklake_data_file df
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM ducklake_meta.ducklake_partition_info pi
+    WHERE pi.partition_id = df.partition_id
+)
+----
+0
+
+# The evolved (b) spec is the single active one.
+query I
+SELECT c.column_id
+FROM ducklake_meta.ducklake_partition_info pi
+JOIN ducklake_meta.ducklake_partition_column c USING (partition_id)
+WHERE pi.end_snapshot IS NULL
+----
+2
+
+query II
+SELECT a, b FROM partition_evolution
+----
+1	101
+
+# CTAS spec evolution with a file written under each spec in the same transaction:
+# the CTAS file references the (a) spec, the INSERT file references the (b) spec.
+statement ok
+BEGIN
+
+statement ok
+CREATE TABLE partition_evolution2 PARTITIONED BY (a) AS
+SELECT 10 AS a, 110 AS b
+
+statement ok
+ALTER TABLE partition_evolution2 SET PARTITIONED BY (b)
+
+statement ok
+INSERT INTO partition_evolution2 VALUES (20, 120)
+
+statement ok
+COMMIT
+
+query I
+SELECT count(*)
+FROM ducklake_meta.ducklake_data_file df
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM ducklake_meta.ducklake_partition_info pi
+    WHERE pi.partition_id = df.partition_id
+)
+----
+0
+
+# The two files of the table reference two distinct specs.
+query I
+SELECT count(DISTINCT df.partition_id)
+FROM ducklake_meta.ducklake_data_file df
+JOIN ducklake_meta."ducklake_table" t USING (table_id)
+WHERE t.table_name = 'partition_evolution2'
+----
+2
+
+query II
+SELECT a, b FROM partition_evolution2 ORDER BY a
+----
+10	110
+20	120
+
+query II
+SELECT a, b FROM partition_evolution2 WHERE b = 120
+----
+20	120

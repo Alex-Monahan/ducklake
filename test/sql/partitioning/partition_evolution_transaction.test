@@ -1,0 +1,299 @@
+# name: test/sql/partitioning/partition_evolution_transaction.test
+# description: Partition specs referenced by data files survive same-transaction partition evolution
+# group: [partitioning]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+# Force rows into Parquet so the write-time partition_id is recorded in ducklake_data_file.
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/partition_evolution_transaction', METADATA_CATALOG 'ducklake_meta', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+USE ducklake
+
+# Scenario 1: set a partition key, insert a file under it, then evolve the key - all in one transaction.
+# The file references the first spec, so both specs must be persisted at commit.
+statement ok
+CREATE TABLE evolution (a INTEGER, b INTEGER)
+
+statement ok
+BEGIN
+
+statement ok
+ALTER TABLE evolution SET PARTITIONED BY (a)
+
+statement ok
+INSERT INTO evolution VALUES (1, 101)
+
+statement ok
+ALTER TABLE evolution SET PARTITIONED BY (b)
+
+statement ok
+COMMIT
+
+query I
+SELECT count(*) FROM ducklake_meta.ducklake_data_file
+----
+1
+
+# Every partition_id referenced by a data file must resolve to a persisted partition spec.
+query I
+SELECT count(*)
+FROM ducklake_meta.ducklake_data_file df
+WHERE df.partition_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1
+    FROM ducklake_meta.ducklake_partition_info pi
+    WHERE pi.partition_id = df.partition_id
+)
+----
+0
+
+# The superseded spec is persisted with an empty validity interval, the new spec is active.
+query II
+SELECT count(*) FILTER (end_snapshot IS NULL), count(*) FILTER (end_snapshot IS NOT NULL)
+FROM ducklake_meta.ducklake_partition_info
+----
+1	1
+
+# The active spec partitions by b, the superseded spec (referenced by the file) partitions by a.
+query I
+SELECT c.column_id
+FROM ducklake_meta.ducklake_partition_info pi
+JOIN ducklake_meta.ducklake_partition_column c USING (partition_id)
+WHERE pi.end_snapshot IS NULL
+----
+2
+
+query I
+SELECT c.column_id
+FROM ducklake_meta.ducklake_data_file df
+JOIN ducklake_meta.ducklake_partition_column c ON (c.partition_id = df.partition_id)
+----
+1
+
+query II
+SELECT a, b FROM evolution
+----
+1	101
+
+# Scenario 2: several evolutions with inserts in between - every referenced spec must be persisted.
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO evolution VALUES (2, 102)
+
+statement ok
+ALTER TABLE evolution SET PARTITIONED BY (a, b)
+
+statement ok
+INSERT INTO evolution VALUES (3, 103)
+
+statement ok
+ALTER TABLE evolution SET PARTITIONED BY (a)
+
+statement ok
+INSERT INTO evolution VALUES (4, 104)
+
+statement ok
+COMMIT
+
+query I
+SELECT count(*)
+FROM ducklake_meta.ducklake_data_file df
+WHERE df.partition_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1
+    FROM ducklake_meta.ducklake_partition_info pi
+    WHERE pi.partition_id = df.partition_id
+)
+----
+0
+
+# Exactly one spec remains active.
+query I
+SELECT count(*) FROM ducklake_meta.ducklake_partition_info WHERE end_snapshot IS NULL
+----
+1
+
+query II
+SELECT a, b FROM evolution ORDER BY a
+----
+1	101
+2	102
+3	103
+4	104
+
+query II
+SELECT a, b FROM evolution WHERE a = 3
+----
+3	103
+
+# Scenario 3: evolve away from the committed spec and back to it in one transaction.
+# The final spec is identical to the committed one, so files written in this transaction
+# must reference the already-committed spec instead of a discarded duplicate.
+statement ok
+CREATE TABLE roundtrip (a INTEGER, b INTEGER)
+
+statement ok
+ALTER TABLE roundtrip SET PARTITIONED BY (a)
+
+statement ok
+INSERT INTO roundtrip VALUES (1, 101)
+
+statement ok
+SET VARIABLE roundtrip_partition_id = (
+    SELECT partition_id FROM ducklake_meta.ducklake_partition_info pi
+    JOIN ducklake_meta."ducklake_table" t USING (table_id)
+    WHERE t.table_name = 'roundtrip' AND pi.end_snapshot IS NULL
+)
+
+statement ok
+BEGIN
+
+statement ok
+ALTER TABLE roundtrip SET PARTITIONED BY (b)
+
+statement ok
+ALTER TABLE roundtrip SET PARTITIONED BY (a)
+
+statement ok
+INSERT INTO roundtrip VALUES (2, 102)
+
+statement ok
+COMMIT
+
+# The committed spec is still the active one.
+query I
+SELECT count(*)
+FROM ducklake_meta.ducklake_partition_info pi
+JOIN ducklake_meta."ducklake_table" t USING (table_id)
+WHERE t.table_name = 'roundtrip' AND pi.end_snapshot IS NULL
+  AND pi.partition_id = getvariable('roundtrip_partition_id')
+----
+1
+
+# Both files of the table reference the committed spec.
+query I
+SELECT count(*)
+FROM ducklake_meta.ducklake_data_file df
+JOIN ducklake_meta."ducklake_table" t USING (table_id)
+WHERE t.table_name = 'roundtrip'
+  AND df.partition_id = getvariable('roundtrip_partition_id')
+----
+2
+
+query II
+SELECT a, b FROM roundtrip ORDER BY a
+----
+1	101
+2	102
+
+# Scenario 4: RESET PARTITIONED BY followed by an insert in the same transaction.
+# The files are written unpartitioned and must not be tagged with the empty spec.
+statement ok
+CREATE TABLE reset_insert (a INTEGER, b INTEGER)
+
+statement ok
+ALTER TABLE reset_insert SET PARTITIONED BY (a)
+
+statement ok
+BEGIN
+
+statement ok
+ALTER TABLE reset_insert RESET PARTITIONED BY
+
+statement ok
+INSERT INTO reset_insert VALUES (1, 101)
+
+statement ok
+COMMIT
+
+query I
+SELECT count(*)
+FROM ducklake_meta.ducklake_data_file df
+JOIN ducklake_meta."ducklake_table" t USING (table_id)
+WHERE t.table_name = 'reset_insert' AND df.partition_id IS NOT NULL
+----
+0
+
+# The table is no longer partitioned.
+query I
+SELECT count(*)
+FROM ducklake_meta.ducklake_partition_info pi
+JOIN ducklake_meta.ducklake_partition_column c USING (partition_id)
+JOIN ducklake_meta."ducklake_table" t ON (pi.table_id = t.table_id)
+WHERE t.table_name = 'reset_insert' AND pi.end_snapshot IS NULL
+----
+0
+
+query II
+SELECT a, b FROM reset_insert
+----
+1	101
+
+# Scenario 5: partition evolution of two tables in a single transaction.
+statement ok
+CREATE TABLE multi_one (a INTEGER, b INTEGER)
+
+statement ok
+CREATE TABLE multi_two (a INTEGER, b INTEGER)
+
+statement ok
+BEGIN
+
+statement ok
+ALTER TABLE multi_one SET PARTITIONED BY (a)
+
+statement ok
+INSERT INTO multi_one VALUES (1, 101)
+
+statement ok
+ALTER TABLE multi_one SET PARTITIONED BY (b)
+
+statement ok
+ALTER TABLE multi_two SET PARTITIONED BY (b)
+
+statement ok
+INSERT INTO multi_two VALUES (2, 102)
+
+statement ok
+COMMIT
+
+query I
+SELECT count(*)
+FROM ducklake_meta.ducklake_data_file df
+WHERE df.partition_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1
+    FROM ducklake_meta.ducklake_partition_info pi
+    WHERE pi.partition_id = df.partition_id
+)
+----
+0
+
+# One active spec per table.
+query II
+SELECT t.table_name, count(*)
+FROM ducklake_meta.ducklake_partition_info pi
+JOIN ducklake_meta."ducklake_table" t USING (table_id)
+WHERE t.table_name IN ('multi_one', 'multi_two') AND pi.end_snapshot IS NULL
+GROUP BY t.table_name
+ORDER BY t.table_name
+----
+multi_one	1
+multi_two	1
+
+query II
+SELECT a, b FROM multi_one
+----
+1	101
+
+query II
+SELECT a, b FROM multi_two
+----
+2	102

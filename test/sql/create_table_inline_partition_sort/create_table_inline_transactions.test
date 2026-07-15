@@ -231,9 +231,9 @@ SELECT count(*), max(i) FROM ducklake.concurrent_b
 7	6
 
 # ----------------------------------------------------------------------------------------------------------------------
-# Test 6: Same-transaction inline CTAS + ALTER SET PARTITIONED BY + COMMIT. Last writer wins (the
-# metadata-layer dedup collapses by table_id; final on-disk state references the ALTER's partition column).
-# This is regression coverage for the chain-walk behavior change in this branch.
+# Test 6: Same-transaction inline CTAS + ALTER SET PARTITIONED BY + COMMIT. The last ALTER's spec
+# becomes the active one, but the CTAS's spec is persisted too (with an empty validity interval)
+# because data files written by the CTAS reference it.
 # ----------------------------------------------------------------------------------------------------------------------
 
 statement ok
@@ -255,12 +255,25 @@ COMMIT
 statement ok
 SET VARIABLE chain_winner_id = (SELECT table_id FROM ducklake_meta.ducklake_table WHERE table_name = 'chain_winner')
 
-# exactly one partition_info row (the last ALTER's) and one sort_info row (the last ALTER's)
-query I
-SELECT count(*) FROM ducklake_meta.ducklake_partition_info
+# one active partition_info row (the last ALTER's) plus the superseded CTAS spec
+query II
+SELECT count(*) FILTER (end_snapshot IS NULL), count(*) FILTER (begin_snapshot = end_snapshot)
+FROM ducklake_meta.ducklake_partition_info
 WHERE table_id = getvariable('chain_winner_id')
 ----
-1
+1	1
+
+# the CTAS data files must reference a persisted partition spec (the superseded CTAS spec)
+query I
+SELECT count(*)
+FROM ducklake_meta.ducklake_data_file df
+WHERE df.table_id = getvariable('chain_winner_id') AND NOT EXISTS (
+    SELECT 1
+    FROM ducklake_meta.ducklake_partition_info pi
+    WHERE pi.partition_id = df.partition_id
+)
+----
+0
 
 query I
 SELECT count(*) FROM ducklake_meta.ducklake_sort_info
