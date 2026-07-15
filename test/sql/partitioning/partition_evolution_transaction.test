@@ -318,3 +318,58 @@ query II
 SELECT a, b FROM multi_two
 ----
 2	102
+
+# Scenario 6: RESET PARTITIONED BY followed by flushing inlined data in the same transaction.
+# The flush sees the committed (pre-RESET) spec; the flushed file must reference a persisted spec
+# either way and the commit must stay consistent.
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/{UUID}_inline.db' AS ducklake_inline (DATA_PATH '{DATA_PATH}/partition_evolution_inline', METADATA_CATALOG 'inline_meta', DATA_INLINING_ROW_LIMIT 10)
+
+statement ok
+USE ducklake_inline
+
+statement ok
+CREATE TABLE reset_flush (a INTEGER, b INTEGER)
+
+statement ok
+ALTER TABLE reset_flush SET PARTITIONED BY (a)
+
+statement ok
+INSERT INTO reset_flush VALUES (1, 101)
+
+statement ok
+BEGIN
+
+statement ok
+ALTER TABLE reset_flush RESET PARTITIONED BY
+
+statement ok
+SELECT * FROM ducklake_flush_inlined_data('ducklake_inline')
+
+statement ok
+COMMIT
+
+query I
+SELECT count(*)
+FROM inline_meta.ducklake_data_file df
+WHERE df.partition_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1
+    FROM inline_meta.ducklake_partition_info pi
+    WHERE pi.partition_id = df.partition_id
+)
+----
+0
+
+# The RESET is committed: no active spec remains for the table.
+query I
+SELECT count(*)
+FROM inline_meta.ducklake_partition_info pi
+JOIN inline_meta.ducklake_partition_column c USING (partition_id)
+WHERE pi.end_snapshot IS NULL
+----
+0
+
+query II
+SELECT a, b FROM reset_flush
+----
+1	101

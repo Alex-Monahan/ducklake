@@ -1232,7 +1232,7 @@ DuckLakeDataFile DuckLakeFileProcessor::AddFileToTable(ParquetFileMetadata &file
 	// we successfully mapped this file - register the name map and refer to it in the file
 	result.mapping_id = transaction.AddNameMap(std::move(name_map));
 
-	const auto partition_data = table.GetPartitionData().get();
+	const auto partition_data = table.GetWritePartitionData().get();
 	if (partition_data) {
 		bool invalid_partition = false;
 		if (file.hive_partition_values.size() != partition_data->fields.size()) {

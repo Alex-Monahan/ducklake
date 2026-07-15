@@ -306,7 +306,7 @@ unique_ptr<LogicalOperator> DuckLakeDataFlusher::GenerateFlushCommand() {
 	multi_file_bind_data.file_list = make_uniq<DuckLakeMultiFileList>(read_info, inlined_table);
 
 	optional_idx partition_id;
-	auto partition_data = table.GetPartitionData();
+	auto partition_data = table.GetWritePartitionData();
 	if (partition_data) {
 		partition_id = partition_data->partition_id;
 	}

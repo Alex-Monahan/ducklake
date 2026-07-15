@@ -356,7 +356,7 @@ DuckLakeCopyOptions::DuckLakeCopyOptions(unique_ptr<CopyInfo> info_p, CopyFuncti
 DuckLakeCopyInput::DuckLakeCopyInput(ClientContext &context, DuckLakeTableEntry &table, const string &hive_partition)
     : catalog(table.ParentCatalog().Cast<DuckLakeCatalog>()), columns(table.GetColumns()),
       data_path(table.DataPath() + hive_partition) {
-	partition_data = table.GetPartitionData();
+	partition_data = table.GetWritePartitionData();
 	field_data = table.GetFieldData();
 	schema_id = table.ParentSchema().Cast<DuckLakeSchemaEntry>().GetSchemaId();
 	table_id = table.GetTableId();
@@ -758,11 +758,9 @@ PhysicalOperator &DuckLakeInsert::PlanCopyForInsert(ClientContext &context, Phys
 
 PhysicalOperator &DuckLakeInsert::PlanInsert(ClientContext &context, PhysicalPlanGenerator &planner,
                                              DuckLakeTableEntry &table, string encryption_key) {
-	auto partition_data = table.GetPartitionData();
+	auto partition_data = table.GetWritePartitionData();
 	optional_idx partition_id;
-	if (partition_data && !partition_data->fields.empty()) {
-		// a spec without fields (RESET PARTITIONED BY in this transaction) does not partition the data -
-		// files written under it must not be tagged with its partition id
+	if (partition_data) {
 		partition_id = partition_data->partition_id;
 	}
 	vector<LogicalType> return_types;
