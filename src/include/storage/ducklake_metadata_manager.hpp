@@ -267,13 +267,9 @@ public:
 	                             const vector<DuckLakePath> &resolved_paths);
 	static string WriteNewViews(const vector<DuckLakeViewInfo> &new_views);
 	//! Emits the partition-key diff SQL. Caller supplies the existing partition state (fetched
-	//! via GetCatalogForSnapshot) since the diff is computed against it. When a new spec turns out
-	//! to be identical to the already-committed spec of its table, it is not written - instead
-	//! reused_partition_ids records (discarded new id -> committed id) so the caller can re-point
-	//! data files that were written under the discarded id.
+	//! via GetCatalogForSnapshot) since the diff is computed against it.
 	static string WriteNewPartitionKeys(const vector<DuckLakePartitionInfo> &existing_partitions,
-	                                    const vector<DuckLakePartitionInfo> &new_partitions,
-	                                    map<idx_t, idx_t> &reused_partition_ids);
+	                                    const vector<DuckLakePartitionInfo> &new_partitions);
 	//! Emits the sort-key diff SQL. Caller supplies the existing sort state (fetched via
 	//! GetCatalogForSnapshot) since the diff is computed against it.
 	static string WriteNewSortKeys(const vector<DuckLakeSortInfo> &existing_sorts,

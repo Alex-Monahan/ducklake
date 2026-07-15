@@ -151,8 +151,8 @@ SELECT a, b FROM evolution WHERE a = 3
 3	103
 
 # Scenario 3: evolve away from the committed spec and back to it in one transaction.
-# The final spec is identical to the committed one, so files written in this transaction
-# must reference the already-committed spec instead of a discarded duplicate.
+# Like returning to a previous partition across transactions, this writes a new spec version
+# with the same fields; the transaction's file references it and the old spec is closed.
 statement ok
 CREATE TABLE roundtrip (a INTEGER, b INTEGER)
 
@@ -161,13 +161,6 @@ ALTER TABLE roundtrip SET PARTITIONED BY (a)
 
 statement ok
 INSERT INTO roundtrip VALUES (1, 101)
-
-statement ok
-SET VARIABLE roundtrip_partition_id = (
-    SELECT partition_id FROM ducklake_meta.ducklake_partition_info pi
-    JOIN ducklake_meta."ducklake_table" t USING (table_id)
-    WHERE t.table_name = 'roundtrip' AND pi.end_snapshot IS NULL
-)
 
 statement ok
 BEGIN
@@ -184,23 +177,35 @@ INSERT INTO roundtrip VALUES (2, 102)
 statement ok
 COMMIT
 
-# The committed spec is still the active one.
+# Exactly one active spec, and it partitions by a.
 query I
-SELECT count(*)
+SELECT c.column_id
 FROM ducklake_meta.ducklake_partition_info pi
-JOIN ducklake_meta."ducklake_table" t USING (table_id)
+JOIN ducklake_meta.ducklake_partition_column c USING (partition_id)
+JOIN ducklake_meta."ducklake_table" t ON (pi.table_id = t.table_id)
 WHERE t.table_name = 'roundtrip' AND pi.end_snapshot IS NULL
-  AND pi.partition_id = getvariable('roundtrip_partition_id')
 ----
 1
 
-# Both files of the table reference the committed spec.
+# Every file of the table references a persisted spec: the pre-transaction file the original
+# (now closed) spec, the in-transaction file the new active spec.
 query I
 SELECT count(*)
 FROM ducklake_meta.ducklake_data_file df
 JOIN ducklake_meta."ducklake_table" t USING (table_id)
+WHERE t.table_name = 'roundtrip' AND NOT EXISTS (
+    SELECT 1
+    FROM ducklake_meta.ducklake_partition_info pi
+    WHERE pi.partition_id = df.partition_id
+)
+----
+0
+
+query I
+SELECT count(DISTINCT df.partition_id)
+FROM ducklake_meta.ducklake_data_file df
+JOIN ducklake_meta."ducklake_table" t USING (table_id)
 WHERE t.table_name = 'roundtrip'
-  AND df.partition_id = getvariable('roundtrip_partition_id')
 ----
 2
 

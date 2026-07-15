@@ -4342,9 +4342,13 @@ WHERE snapshot_id = (
 	return snapshot;
 }
 
-static unordered_map<idx_t, DuckLakePartitionInfo> GetNewPartitions(const vector<DuckLakePartitionInfo> &old_partitions,
-                                                                    const vector<DuckLakePartitionInfo> &new_partitions,
-                                                                    map<idx_t, idx_t> &reused_partition_ids) {
+static unordered_map<idx_t, DuckLakePartitionInfo>
+GetNewPartitions(const vector<DuckLakePartitionInfo> &old_partitions,
+                 const vector<DuckLakePartitionInfo> &new_partitions) {
+	// Note that a spec that reaches commit is always written, even if it happens to match the committed
+	// spec (e.g. evolving away from it and back in one transaction) - data files written in this
+	// transaction reference its id. Redundant consecutive changes never get here: they are
+	// short-circuited at ALTER time, and concurrent alters of the same table abort with a conflict.
 	unordered_map<idx_t, DuckLakePartitionInfo> new_partition_map;
 
 	for (auto &partition : new_partitions) {
@@ -4354,15 +4358,6 @@ static unordered_map<idx_t, DuckLakePartitionInfo> GetNewPartitions(const vector
 	unordered_set<idx_t> old_partition_set;
 	for (auto &partition : old_partitions) {
 		old_partition_set.insert(partition.table_id.index);
-		auto entry = new_partition_map.find(partition.table_id.index);
-		if (entry != new_partition_map.end() && entry->second == partition) {
-			// The new partition spec is identical to the already-committed spec - it's a nop, we can remove it.
-			// Data files written under the new (discarded) id must be re-pointed to the committed spec.
-			if (entry->second.id.IsValid() && partition.id.IsValid()) {
-				reused_partition_ids[entry->second.id.GetIndex()] = partition.id.GetIndex();
-			}
-			new_partition_map.erase(entry);
-		}
 	}
 
 	vector<idx_t> partition_ids_to_erase;
@@ -4398,8 +4393,7 @@ static void AddPartitionSpecValues(const DuckLakePartitionInfo &partition, const
 }
 
 string DuckLakeMetadataManager::WriteNewPartitionKeys(const vector<DuckLakePartitionInfo> &existing_partitions,
-                                                      const vector<DuckLakePartitionInfo> &new_partitions,
-                                                      map<idx_t, idx_t> &reused_partition_ids) {
+                                                      const vector<DuckLakePartitionInfo> &new_partitions) {
 	if (new_partitions.empty()) {
 		return {};
 	}
@@ -4432,7 +4426,7 @@ string DuckLakeMetadataManager::WriteNewPartitionKeys(const vector<DuckLakeParti
 	}
 
 	string old_partition_table_ids;
-	auto new_partition_map = GetNewPartitions(existing_partitions, active_partitions, reused_partition_ids);
+	auto new_partition_map = GetNewPartitions(existing_partitions, active_partitions);
 	for (auto &new_partition : new_partition_map) {
 		// set old partition data as no longer valid
 		if (!old_partition_table_ids.empty()) {
