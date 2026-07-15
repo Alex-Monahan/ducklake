@@ -77,6 +77,12 @@ JOIN ducklake_meta.ducklake_partition_column c ON (c.partition_id = df.partition
 ----
 1
 
+# The file was physically written into the hive directory of the spec in effect at write time (a).
+query I
+SELECT count(*) FROM ducklake_meta.ducklake_data_file WHERE path LIKE '%a=1%'
+----
+1
+
 query II
 SELECT a, b FROM evolution
 ----
@@ -120,6 +126,16 @@ query I
 SELECT count(*) FROM ducklake_meta.ducklake_partition_info WHERE end_snapshot IS NULL
 ----
 1
+
+# Each file was written into the hive directory of the spec in effect at its write time:
+# (2, 102) under (b), (3, 103) under (a, b), (4, 104) under (a).
+query III
+SELECT count(*) FILTER (path LIKE '%b=102%'),
+       count(*) FILTER (path LIKE '%a=3%' AND path LIKE '%b=103%'),
+       count(*) FILTER (path LIKE '%a=4%' AND path NOT LIKE '%b=104%')
+FROM ducklake_meta.ducklake_data_file
+----
+1	1	1
 
 query II
 SELECT a, b FROM evolution ORDER BY a
