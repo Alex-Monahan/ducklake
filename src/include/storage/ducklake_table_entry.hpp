@@ -58,6 +58,21 @@ public:
 	optional_ptr<const DuckLakePartition> GetPartitionData() const {
 		return partition_data.get();
 	}
+	//! The partition spec to write data under, if any. A spec without fields (RESET PARTITIONED BY
+	//! in this transaction) does not partition the data - files must not be tagged with its id and
+	//! writes must not be planned as partitioned.
+	optional_ptr<DuckLakePartition> GetWritePartitionData() {
+		if (partition_data && partition_data->fields.empty()) {
+			return nullptr;
+		}
+		return partition_data.get();
+	}
+	optional_ptr<const DuckLakePartition> GetWritePartitionData() const {
+		if (partition_data && partition_data->fields.empty()) {
+			return nullptr;
+		}
+		return partition_data.get();
+	}
 	//! Returns SQL expressions for each partition field (e.g., "region", "year(ts)")
 	vector<string> GetPartitionSQLExpressions() const;
 	optional_ptr<DuckLakeSort> GetSortData() {

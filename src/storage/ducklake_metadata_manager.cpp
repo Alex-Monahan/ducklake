@@ -4345,6 +4345,10 @@ WHERE snapshot_id = (
 static unordered_map<idx_t, DuckLakePartitionInfo>
 GetNewPartitions(const vector<DuckLakePartitionInfo> &old_partitions,
                  const vector<DuckLakePartitionInfo> &new_partitions) {
+	// Note that a spec that reaches commit is always written, even if it happens to match the committed
+	// spec (e.g. evolving away from it and back in one transaction) - data files written in this
+	// transaction reference its id. Redundant consecutive changes never get here: they are
+	// short-circuited at ALTER time, and concurrent alters of the same table abort with a conflict.
 	unordered_map<idx_t, DuckLakePartitionInfo> new_partition_map;
 
 	for (auto &partition : new_partitions) {
@@ -4354,12 +4358,6 @@ GetNewPartitions(const vector<DuckLakePartitionInfo> &old_partitions,
 	unordered_set<idx_t> old_partition_set;
 	for (auto &partition : old_partitions) {
 		old_partition_set.insert(partition.table_id.index);
-		if (new_partition_map.find(partition.table_id.index) != new_partition_map.end()) {
-			if (new_partition_map[partition.table_id.index] == partition) {
-				// If a new partition already exists in an old partition, it's a nop, we can remove it
-				new_partition_map.erase(partition.table_id.index);
-			}
-		}
 	}
 
 	vector<idx_t> partition_ids_to_erase;
@@ -4376,20 +4374,59 @@ GetNewPartitions(const vector<DuckLakePartitionInfo> &old_partitions,
 	return new_partition_map;
 }
 
+static void AddPartitionSpecValues(const DuckLakePartitionInfo &partition, const string &end_snapshot,
+                                   string &new_partition_values, string &insert_partition_cols) {
+	auto partition_id = partition.id.GetIndex();
+	if (!new_partition_values.empty()) {
+		new_partition_values += ", ";
+	}
+	new_partition_values +=
+	    StringUtil::Format(R"((%d, %d, {SNAPSHOT_ID}, %s))", partition_id, partition.table_id.index, end_snapshot);
+	for (auto &field : partition.fields) {
+		if (!insert_partition_cols.empty()) {
+			insert_partition_cols += ", ";
+		}
+		insert_partition_cols +=
+		    StringUtil::Format("(%d, %d, %d, %d, %s)", partition_id, partition.table_id.index,
+		                       field.partition_key_index, field.field_id.index, SQLString(field.transform));
+	}
+}
+
 string DuckLakeMetadataManager::WriteNewPartitionKeys(const vector<DuckLakePartitionInfo> &existing_partitions,
                                                       const vector<DuckLakePartitionInfo> &new_partitions) {
 	if (new_partitions.empty()) {
 		return {};
 	}
 
-	string old_partition_table_ids;
 	string new_partition_values;
 	string insert_partition_cols;
 
-	auto new_partition_map = GetNewPartitions(existing_partitions, new_partitions);
-	if (new_partition_map.empty()) {
-		return {};
+	// A single transaction can create several partition specs for the same table, e.g.
+	// CREATE TABLE ... PARTITIONED BY (a) AS ... followed by ALTER TABLE ... SET PARTITIONED BY (b).
+	// Only the newest spec of a table becomes the active one, but data files written earlier in the
+	// transaction can still reference a superseded spec - persist superseded specs with an empty
+	// validity interval (begin_snapshot = end_snapshot) so those references remain resolvable.
+	// new_partitions holds specs in creation order, so the last spec of a table is the active one.
+	unordered_map<idx_t, idx_t> last_spec_per_table;
+	for (idx_t partition_idx = 0; partition_idx < new_partitions.size(); partition_idx++) {
+		last_spec_per_table[new_partitions[partition_idx].table_id.index] = partition_idx;
 	}
+	vector<DuckLakePartitionInfo> active_partitions;
+	for (idx_t partition_idx = 0; partition_idx < new_partitions.size(); partition_idx++) {
+		auto &partition = new_partitions[partition_idx];
+		if (last_spec_per_table[partition.table_id.index] == partition_idx) {
+			active_partitions.push_back(partition);
+			continue;
+		}
+		if (!partition.id.IsValid() || partition.fields.empty()) {
+			// data files never reference partition specs without fields (RESET PARTITIONED BY)
+			continue;
+		}
+		AddPartitionSpecValues(partition, "{SNAPSHOT_ID}", new_partition_values, insert_partition_cols);
+	}
+
+	string old_partition_table_ids;
+	auto new_partition_map = GetNewPartitions(existing_partitions, active_partitions);
 	for (auto &new_partition : new_partition_map) {
 		// set old partition data as no longer valid
 		if (!old_partition_table_ids.empty()) {
@@ -4397,43 +4434,27 @@ string DuckLakeMetadataManager::WriteNewPartitionKeys(const vector<DuckLakeParti
 		}
 		old_partition_table_ids += to_string(new_partition.second.table_id.index);
 		if (!new_partition.second.id.IsValid()) {
-			// dropping partition data - we don't need to do anything
-			return {};
+			// dropping partition data - only the invalidation of the old spec is needed
+			continue;
 		}
-		auto partition_id = new_partition.second.id.GetIndex();
-		if (!new_partition_values.empty()) {
-			new_partition_values += ", ";
-		}
-		new_partition_values +=
-		    StringUtil::Format(R"((%d, %d, {SNAPSHOT_ID}, NULL))", partition_id, new_partition.second.table_id.index);
-		for (auto &field : new_partition.second.fields) {
-			if (!insert_partition_cols.empty()) {
-				insert_partition_cols += ", ";
-			}
-			insert_partition_cols +=
-			    StringUtil::Format("(%d, %d, %d, %d, %s)", partition_id, new_partition.second.table_id.index,
-			                       field.partition_key_index, field.field_id.index, SQLString(field.transform));
-		}
+		AddPartitionSpecValues(new_partition.second, "NULL", new_partition_values, insert_partition_cols);
 	}
 
-	// update old partition information for any tables that have been altered
-	auto update_partition_query = StringUtil::Format(R"(
+	string batch_query;
+	if (!old_partition_table_ids.empty()) {
+		// update old partition information for any tables that have been altered
+		batch_query += StringUtil::Format(R"(
 UPDATE {METADATA_CATALOG}.ducklake_partition_info
 SET end_snapshot = {SNAPSHOT_ID}
 WHERE table_id IN (%s) AND end_snapshot IS NULL
 ;)",
-	                                                 old_partition_table_ids);
-	string batch_query = update_partition_query;
-
+		                                  old_partition_table_ids);
+	}
 	if (!new_partition_values.empty()) {
-		new_partition_values =
-		    "INSERT INTO {METADATA_CATALOG}.ducklake_partition_info VALUES " + new_partition_values + ";";
-		batch_query += new_partition_values;
+		batch_query += "INSERT INTO {METADATA_CATALOG}.ducklake_partition_info VALUES " + new_partition_values + ";";
 	}
 	if (!insert_partition_cols.empty()) {
-		insert_partition_cols =
-		    "INSERT INTO {METADATA_CATALOG}.ducklake_partition_column VALUES " + insert_partition_cols + ";";
-		batch_query += insert_partition_cols;
+		batch_query += "INSERT INTO {METADATA_CATALOG}.ducklake_partition_column VALUES " + insert_partition_cols + ";";
 	}
 	return batch_query;
 }
